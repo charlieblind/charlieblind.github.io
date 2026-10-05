@@ -1,0 +1,74 @@
+<!doctype html>
+<html lang="es">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<meta name="description" content="Radar Lima 2026: seguimiento independiente de las actas observadas de la elección municipal de Lima.">
+<title>Radar Lima 2026</title>
+<style>
+:root{--bg:#f3f6f8;--ink:#17212b;--muted:#687687;--line:#dde4ea;--card:#fff;--rp:#0aa0bb;--rp2:#066b82;--ap:#123a8d;--ap2:#df273f;--good:#087a4c;--goodbg:#e9f8f0;--warn:#a36500;--warnbg:#fff6e6;--bad:#b42318;--shadow:0 9px 28px rgba(18,36,52,.08)}
+*{box-sizing:border-box}body{margin:0;background:var(--bg);color:var(--ink);font-family:Segoe UI,Inter,Arial,sans-serif}.wrap{max-width:1220px;margin:auto;padding:20px}
+header{display:flex;justify-content:space-between;gap:16px;align-items:flex-start;flex-wrap:wrap}.title h1{margin:0;font-size:clamp(30px,5vw,48px);letter-spacing:-.04em}.title p{margin:6px 0;color:var(--muted)}
+.pill{display:inline-block;background:#fff;border:1px solid var(--line);border-radius:999px;padding:8px 12px;font-size:12px;color:var(--muted)}
+.hero{display:grid;grid-template-columns:1fr 1fr;gap:14px;margin:18px 0}.cand{height:245px;border-radius:22px;overflow:hidden;position:relative;background:#1a2430;box-shadow:var(--shadow)}
+.cand img{width:100%;height:100%;object-fit:cover;object-position:center 25%}.cand:after{content:"";position:absolute;inset:0;background:linear-gradient(90deg,rgba(5,12,20,.90),rgba(5,12,20,.62) 48%,rgba(5,12,20,.08))}
+.cand.rp{border-left:9px solid var(--rp)}.cand.ap{border-left:9px solid var(--ap2)}.cand .copy{position:absolute;z-index:2;left:22px;top:20px;color:white;max-width:63%}
+.party{font-size:12px;font-weight:800;letter-spacing:.08em;text-transform:uppercase;opacity:.9}.name{font-size:clamp(26px,3vw,36px);font-weight:900;line-height:1;margin:6px 0 10px}.votes{font-size:clamp(31px,4vw,44px);font-weight:900;margin-top:18px}.votes small{display:block;font-size:12px;font-weight:500;opacity:.84}
+.status{background:var(--goodbg);border:1px solid #b8dcc9;border-radius:18px;padding:19px 21px;box-shadow:var(--shadow)}.status h2{margin:5px 0;font-size:clamp(23px,3vw,34px)}.status p{line-height:1.55;margin:7px 0}.badge{display:inline-block;border-radius:999px;background:#d7f2e3;color:var(--good);font-weight:850;font-size:12px;padding:6px 10px}
+.cards{display:grid;grid-template-columns:repeat(3,1fr);gap:12px;margin:14px 0}.card{background:#fff;border:1px solid var(--line);border-radius:16px;padding:17px;box-shadow:var(--shadow)}.q{color:var(--muted);font-size:13px;font-weight:750;line-height:1.35}.a{font-size:clamp(23px,3vw,33px);font-weight:900;margin:7px 0}.e{font-size:13px;color:var(--muted);line-height:1.45}
+.tabs{display:flex;gap:6px;border-bottom:1px solid var(--line);overflow:auto;margin-top:22px}.tab{border:0;background:none;padding:12px 14px;font-weight:800;color:var(--muted);cursor:pointer;white-space:nowrap}.tab.active{color:var(--rp2);border-bottom:3px solid var(--rp)}
+.page{display:none;padding-top:12px}.page.active{display:block}.info{background:#fff;border:1px solid var(--line);border-radius:15px;padding:17px 19px;box-shadow:var(--shadow);line-height:1.6}.info b{color:#075970}
+h3{font-size:21px;margin:14px 0 9px}.tablewrap{max-height:610px;overflow:auto;background:#fff;border:1px solid var(--line);border-radius:14px}.search{margin-bottom:10px;padding:9px 11px;border:1px solid var(--line);border-radius:9px}
+table{width:100%;border-collapse:collapse}th,td{padding:9px 11px;border-bottom:1px solid #edf1f4;text-align:right;font-size:13px}th{position:sticky;top:0;background:#f8fafb;cursor:pointer}th:first-child,td:first-child{text-align:left}.plus{color:var(--good);font-weight:850}.minus{color:var(--bad);font-weight:850}
+.two{display:grid;grid-template-columns:1fr 1fr;gap:12px}.bar{height:13px;border-radius:99px;background:#e9eef2;overflow:hidden;margin:9px 0}.bar span{display:block;height:100%;background:linear-gradient(90deg,var(--rp2),var(--rp))}
+canvas{width:100%;height:300px;background:#fff;border:1px solid var(--line);border-radius:14px}.foot{font-size:11px;color:var(--muted);line-height:1.55;border-top:1px solid var(--line);margin-top:28px;padding-top:14px}
+@media(max-width:780px){.hero,.cards,.two{grid-template-columns:1fr}.cand{height:220px}.cand .copy{max-width:74%}}
+</style>
+</head>
+<body><div class="wrap">
+<header><div class="title"><h1>Radar Lima 2026</h1><p>Qué falta por resolver y cuánto podría cambiar el resultado.</p></div><div class="pill">Corte base: 05/10/2026 12:43 · Seguimiento no oficial</div></header>
+
+<div class="hero">
+  <div class="cand rp"><img src="https://commons.wikimedia.org/wiki/Special:Redirect/file/Aliaga.jpg?width=800" alt="Rafael López Aliaga"><div class="copy"><div class="party">Renovación Popular</div><div class="name">Rafael López Aliaga</div><div class="votes">1,443,999<small>votos ya contabilizados para RP</small></div></div></div>
+  <div class="cand ap"><img src="https://commons.wikimedia.org/wiki/Special:Redirect/file/Francis_Allison.jpg?width=800" alt="Francis Allison"><div class="copy"><div class="party">Avanza País</div><div class="name">Francis Allison</div><div class="votes">1,399,080<small>votos ya contabilizados para AP</small></div></div></div>
+</div>
+
+<div class="status"><span class="badge">● Ventaja muy difícil de revertir</span><h2>RP lleva 44,919 votos de ventaja en lo ya contabilizado.</h2><p>Las <b>1,924 actas observadas</b> no apuntan hoy a una remontada: tomadas tal como están digitadas, <b>aumentan</b> la ventaja de RP en 4,212 votos. Esto no reemplaza las resoluciones del JEE ni la proclamación oficial.</p></div>
+
+<div class="cards">
+ <div class="card"><div class="q">¿Cuánta es la ventaja que ONPE ya tiene contada?</div><div class="a plus">RP +44,919</div><div class="e">No es proyección: es la diferencia dentro de las actas ya contabilizadas.</div></div>
+ <div class="card"><div class="q">¿Y si las observadas terminan valiendo lo que hoy dicen?</div><div class="a plus">RP +49,131</div><div class="e">Se suman los números digitados de las 1,924 actas enviadas al JEE.</div></div>
+ <div class="card"><div class="q">¿Qué pasa en una prueba extrema solo con anulaciones?</div><div class="a plus">RP +21,212</div><div class="e">Se borran todas las observadas que favorecen a RP y se conservan todas las que favorecen a AP. Aun así RP queda arriba.</div></div>
+</div>
+
+<div class="tabs"><button class="tab active" data-p="simple">En sencillo</button><button class="tab" data-p="dist">Distrito por distrito</button><button class="tab" data-p="causas">Por qué están observadas</button><button class="tab" data-p="hist">Histórico</button><button class="tab" data-p="metodo">Cómo se calcula</button></div>
+
+<section id="simple" class="page active">
+ <div class="info"><b>La idea clave:</b> AP no necesita simplemente “ganar las actas que faltan”. Los números de esas actas ya son visibles. Hoy contienen 108,434 votos para RP y 104,222 para AP. Por eso, si quedaran tal cual, la ventaja total pasaría de <b>44,919</b> a <b>49,131</b> votos para RP.<br><br>Para que AP pase adelante, las correcciones y recuentos tendrían que mover aproximadamente <b>49,132 votos netos hacia AP</b> respecto de lo que actualmente muestran esas mismas actas. El radar no dice que sea matemáticamente imposible; dice que, con la información publicada hoy, una remontada necesitaría cambios muy grandes.</div>
+ <div class="cards">
+  <div class="card"><div class="q">Actas todavía pendientes de resolución en este corte</div><div class="a">1,924</div><div class="e">Todas tienen valores de voto digitados disponibles.</div></div>
+  <div class="card"><div class="q">Dentro de esas actas, ¿quién va mejor?</div><div class="a plus">RP +4,212</div><div class="e">RP 108,434 · AP 104,222.</div></div>
+  <div class="card"><div class="q">Cambio mínimo aproximado para invertir el líder</div><div class="a">49,132</div><div class="e">Votos netos hacia AP respecto de los valores digitados actuales.</div></div>
+ </div>
+</section>
+
+<section id="dist" class="page"><h3>Las observadas, distrito por distrito</h3><input id="search" class="search" placeholder="Buscar distrito…"><div class="tablewrap"><table id="dt"><thead><tr><th data-k="n">Distrito</th><th data-k="a">Actas</th><th data-k="r">RP</th><th data-k="p">AP</th><th data-k="g">Quién gana en esas actas</th></tr></thead><tbody></tbody></table></div></section>
+
+<section id="causas" class="page"><div class="info">Una acta puede tener más de un problema. La primera tabla agrupa cada una por una <b>causal principal</b> para entender el volumen; la segunda cuenta etiquetas que pueden superponerse.</div><div class="two" style="margin-top:12px"><div class="tablewrap"><table id="ct"><thead><tr><th>Causal principal</th><th>Actas</th><th>Saldo RP−AP</th></tr></thead><tbody></tbody></table></div><div class="tablewrap"><table id="ft"><thead><tr><th>Problema detectado</th><th>Actas</th></tr></thead><tbody></tbody></table></div></div></section>
+
+<section id="hist" class="page"><div class="info"><b>El histórico empieza hoy.</b> Cada actualización que publiquemos se guardará como un nuevo corte para poder comparar cómo bajan las actas pendientes y cómo cambia la ventaja.</div><h3>Corte disponible</h3><div class="tablewrap"><table><thead><tr><th>Fecha</th><th>Ventaja oficial</th><th>Actas JEE</th><th>Si quedan como están</th><th>Prueba extrema anulaciones</th></tr></thead><tbody><tr><td>05/10/2026 12:43</td><td class="plus">RP +44,919</td><td>1,924</td><td class="plus">RP +49,131</td><td class="plus">RP +21,212</td></tr></tbody></table></div></section>
+
+<section id="metodo" class="page"><div class="info"><p><b>Ventaja oficial:</b> diferencia RP−AP en votos que ONPE ya incorporó al cómputo.</p><p><b>“Si quedan como están”:</b> suma a esa ventaja los votos que hoy aparecen digitados en las actas observadas. No usa encuestas ni promedios de distrito.</p><p><b>“Prueba extrema solo con anulaciones”:</b> elimina todas las actas observadas que hoy favorecen a RP y conserva todas las que favorecen a AP. Sirve como prueba de resistencia; no pretende describir lo que hará el JEE y no modela cambios de votos por recuento.</p><p><b>Importante:</b> el JEE puede corregir, resolver o disponer recuentos. El resultado oficial es el de los organismos electorales.</p></div></section>
+
+<div class="foot"><b>Fuentes:</b> datos públicos de ONPE y estados de actas enviados al JEE. Seguimiento independiente, no oficial. Foto de Rafael López Aliaga: “Aliaga.jpg”, Vox España, CC0, vía Wikimedia Commons. Foto de Francis Allison: Ministerio de la Producción del Perú, imagen marcada como dominio público en Wikimedia Commons.</div>
+</div>
+<script>
+const D=[["Ancón",20,1083,475,608],["Ate",123,4300,14938,-10638],["Barranco",7,501,354,147],["Breña",26,1478,1630,-152],["Carabayllo",68,3861,2441,1420],["Chaclacayo",14,1097,723,374],["Chorrillos",67,4288,2905,1383],["Cieneguilla",13,764,362,402],["Comas",87,4747,4502,245],["El Agustino",65,2459,3182,-723],["Independencia",39,2085,1655,430],["Jesús María",21,1303,1238,65],["La Molina",36,2575,1749,826],["La Victoria",54,2687,2886,-199],["Lima",50,2389,3267,-878],["Lince",20,1340,1084,256],["Los Olivos",50,2920,2770,150],["Lurigancho",33,1767,1368,399],["Lurín",19,1351,503,848],["Magdalena del Mar",12,643,1486,-843],["Miraflores",52,4079,2146,1933],["Pachacámac",16,635,612,23],["Pucusana",7,206,470,-264],["Pueblo Libre",10,625,792,-167],["Puente Piedra",55,3907,2922,985],["Punta Hermosa",3,164,72,92],["Punta Negra",1,81,26,55],["Rímac",45,2484,2249,235],["San Bartolo",3,161,109,52],["San Borja",28,2446,1079,1367],["San Isidro",10,889,358,531],["San Juan de Lurigancho",175,7042,8208,-1166],["San Juan de Miraflores",110,6841,4346,2495],["San Luis",10,564,556,8],["San Martín de Porres",128,7870,6866,1004],["San Miguel",35,2384,2733,-349],["Santa Anita",46,2238,3744,-1506],["Santa María del Mar",0,0,0,0],["Santa Rosa",2,56,28,28],["Santiago de Surco",114,9279,3281,5998],["Surquillo",35,1907,2171,-264],["Villa El Salvador",93,4097,4974,-877],["Villa María del Triunfo",122,6841,6962,-121]], C=[["Error aritmético",1663,93215,90734,2481],["Ilegibilidad",90,5335,4178,1157],["Sin firmas",89,5123,4681,442],["Impugnación / nulidad",80,4694,4598,96],["Sin datos",1,0,0,0],["Incompleta",1,67,31,36]], F=[["Error aritmético",1804],["Acta impugnada",105],["Acta ilegible",91],["Acta sin firmas",89],["Acta sin datos",2],["Solicitud de nulidad",2],["Acta incompleta",1]];
+const fmt=n=>Math.abs(n).toLocaleString('es-PE'); let sortKey='g',dir=-1;
+function districtRows(){const q=(document.getElementById('search').value||'').toLowerCase();let x=D.map(v=>({n:v[0],a:v[1],r:v[2],p:v[3],g:v[4]})).filter(v=>v.n.toLowerCase().includes(q));x.sort((a,b)=>typeof a[sortKey]==='string'?dir*a[sortKey].localeCompare(b[sortKey]):dir*(a[sortKey]-b[sortKey]));return x}
+function drawD(){document.querySelector('#dt tbody').innerHTML=districtRows().map(x=>'<tr><td>'+x.n+'</td><td>'+x.a+'</td><td>'+x.r.toLocaleString('es-PE')+'</td><td>'+x.p.toLocaleString('es-PE')+'</td><td class="'+(x.g>0?'plus':x.g<0?'minus':'')+'">'+(x.g>0?'RP +'+fmt(x.g):x.g<0?'AP +'+fmt(x.g):'Empate')+'</td></tr>').join('')}
+function drawC(){document.querySelector('#ct tbody').innerHTML=C.map(x=>'<tr><td>'+x[0]+'</td><td>'+x[1].toLocaleString('es-PE')+'</td><td class="'+(x[4]>0?'plus':x[4]<0?'minus':'')+'">'+(x[4]>=0?'RP +'+fmt(x[4]):'AP +'+fmt(x[4]))+'</td></tr>').join('');document.querySelector('#ft tbody').innerHTML=F.map(x=>'<tr><td>'+x[0]+'</td><td>'+x[1].toLocaleString('es-PE')+'</td></tr>').join('')}
+document.querySelectorAll('.tab').forEach(b=>b.onclick=()=>{document.querySelectorAll('.tab').forEach(z=>z.classList.remove('active'));document.querySelectorAll('.page').forEach(z=>z.classList.remove('active'));b.classList.add('active');document.getElementById(b.dataset.p).classList.add('active')});
+document.getElementById('search').oninput=drawD;document.querySelectorAll('#dt th').forEach(th=>th.onclick=()=>{const k=th.dataset.k;if(!k)return;if(sortKey===k)dir*=-1;else{sortKey=k;dir=k==='n'?1:-1}drawD()});drawD();drawC();
+</script>
+</body></html>
