@@ -500,6 +500,22 @@ select,input{border:1px solid var(--line);background:#fff;border-radius:9px;padd
 .vote{font-size:clamp(28px,4vw,42px);font-weight:900;margin-top:18px}
 .vote small{display:block;font-size:12px;font-weight:500;opacity:.85}
 .status{border-radius:18px;padding:18px 20px;margin:14px 0;box-shadow:var(--shadow);border:1px solid #b9d7c7;background:var(--goodbg)}
+.projection{background:linear-gradient(135deg,#fff8dc 0%,#fff1b8 55%,#ffe59a 100%);border:2px solid #e0a400;border-radius:20px;padding:20px 22px;box-shadow:0 10px 30px rgba(151,103,0,.16);margin:14px 0 18px}
+.projection-head{display:flex;justify-content:space-between;gap:16px;align-items:flex-start;flex-wrap:wrap}
+.projection-kicker{font-size:12px;font-weight:950;letter-spacing:.09em;text-transform:uppercase;color:#8b5c00}
+.projection-title{font-size:clamp(25px,4vw,38px);font-weight:950;letter-spacing:-.025em;margin:4px 0 3px}
+.projection-sub{color:var(--muted);font-size:13px;line-height:1.45}
+.confidence{display:inline-flex;align-items:center;gap:7px;border-radius:999px;padding:8px 12px;font-size:12px;font-weight:900;background:#dff4e9;color:var(--good);white-space:nowrap}
+.confidence.high{background:#fff0cf;color:#8a5a00}
+.confidence.open{background:#fde6e3;color:var(--bad)}
+.projection-grid{display:grid;grid-template-columns:repeat(4,1fr);gap:10px;margin-top:16px}
+.proj-stat{background:#fff;border:1px solid var(--line);border-radius:13px;padding:13px 14px}
+.proj-label{font-size:11px;color:var(--muted);font-weight:750;line-height:1.3}
+.proj-value{font-size:22px;font-weight:900;margin-top:4px}
+.projection-note{margin-top:14px;font-size:13px;line-height:1.55;color:#33485e}
+.projection-link{margin-top:10px;border:0;background:none;color:var(--rp2);font-weight:850;padding:0;cursor:pointer;text-decoration:underline}
+@media(max-width:900px){.projection-grid{grid-template-columns:1fr 1fr}}
+@media(max-width:560px){.projection-grid{grid-template-columns:1fr}}
 .status h2{margin:0 0 5px;font-size:clamp(23px,4vw,34px)}
 .status p{margin:6px 0;line-height:1.55}
 .status.warn{background:var(--warnbg);border-color:#ecd09c}
@@ -522,6 +538,7 @@ table{width:100%;border-collapse:collapse}
 th,td{padding:9px 11px;border-bottom:1px solid #edf1f4;text-align:right;font-size:13px}
 th{position:sticky;top:0;background:#f8fafb;z-index:2;cursor:pointer}
 th:first-child,td:first-child{text-align:left}
+tfoot th{background:#f3f6f8;border-top:2px solid var(--line);font-weight:900}
 .plus{color:var(--good);font-weight:850}.minus{color:var(--bad);font-weight:850}
 .legend{display:flex;flex-wrap:wrap;gap:12px;font-size:12px;color:var(--muted);margin:8px 0 12px}
 .dot{width:10px;height:10px;border-radius:50%;display:inline-block;margin-right:5px}
@@ -598,6 +615,40 @@ canvas{width:100%;height:330px}
 
   <div id="status" class="status"></div>
 
+  <div class="projection" id="projectionBox">
+    <div class="projection-head">
+      <div>
+        <div class="projection-kicker">Proyección del radar</div>
+        <div class="projection-title" id="projectionTitle">—</div>
+        <div class="projection-sub" id="projectionSub">—</div>
+      </div>
+      <div class="confidence" id="projectionConfidence">—</div>
+    </div>
+
+    <div class="projection-grid">
+      <div class="proj-stat">
+        <div class="proj-label">Ganador proyectado</div>
+        <div class="proj-value" id="projectionWinner">—</div>
+      </div>
+      <div class="proj-stat">
+        <div class="proj-label">Ventaja proyectada</div>
+        <div class="proj-value" id="projectionMargin">—</div>
+      </div>
+      <div class="proj-stat">
+        <div class="proj-label">Actas observadas aún abiertas</div>
+        <div class="proj-value" id="projectionObserved">—</div>
+      </div>
+      <div class="proj-stat">
+        <div class="proj-label">Cambio neto que necesitaría AP para pasar adelante</div>
+        <div class="proj-value" id="projectionNeed">—</div>
+      </div>
+    </div>
+
+    <div class="projection-note" id="projectionNote">—</div>
+    <button class="projection-link" id="projectionMethodLink">¿Cómo se calcula?</button>
+  </div>
+
+
   <div class="grid">
     <div class="simplecard">
       <div class="question">¿Cuánto lleva de ventaja RP en lo ya contado?</div>
@@ -660,12 +711,19 @@ canvas{width:100%;height:330px}
   <section id="causas" class="page">
     <h3>¿Por qué esas actas fueron enviadas al JEE?</h3>
     <div class="info" style="margin-bottom:12px">
-      Una misma acta puede tener más de un problema. Por eso abajo hay una tabla de <b>causal principal</b> y otra de <b>etiquetas</b> que pueden superponerse.
+      <b>Las dos tablas miden cosas distintas.</b> La de la izquierda reparte cada acta <b>una sola vez</b> en una “causa principal”, para que el total coincida exactamente con el número de actas observadas. La de la derecha cuenta <b>todos los problemas que aparecen</b> en las actas: una misma acta puede tener, por ejemplo, <i>error aritmético + ilegibilidad</i>, y entonces aparece una vez en cada etiqueta. Por eso los números de ambas tablas no tienen que coincidir y la suma de la derecha puede ser mayor que el total de actas.
     </div>
     <div class="grid" style="grid-template-columns:1fr 1fr">
-      <div class="tablewrap"><table id="causeTable"><thead><tr><th>Causal principal</th><th>Actas</th><th>Saldo RP−AP</th></tr></thead><tbody></tbody></table></div>
-      <div class="tablewrap"><table id="flagTable"><thead><tr><th>Problema detectado</th><th>Actas</th></tr></thead><tbody></tbody></table></div>
+      <div>
+        <div class="q" style="margin:0 0 7px 3px">CLASIFICACIÓN EXCLUSIVA · CADA ACTA APARECE UNA VEZ</div>
+        <div class="tablewrap"><table id="causeTable"><thead><tr><th>Causa principal asignada</th><th>Actas</th><th>Saldo RP−AP</th></tr></thead><tbody></tbody><tfoot><tr><th>Total de actas</th><th id="causeTotal">—</th><th></th></tr></tfoot></table></div>
+      </div>
+      <div>
+        <div class="q" style="margin:0 0 7px 3px">ETIQUETAS DETECTADAS · UNA ACTA PUEDE APARECER VARIAS VECES</div>
+        <div class="tablewrap"><table id="flagTable"><thead><tr><th>Problema encontrado</th><th>Veces que aparece</th></tr></thead><tbody></tbody><tfoot><tr><th>Total de etiquetas</th><th id="flagTotal">—</th></tr></tfoot></table></div>
+      </div>
     </div>
+    <div class="info" id="causeExplanation" style="margin-top:12px"></div>
   </section>
 
   <section id="historico" class="page">
@@ -688,7 +746,9 @@ canvas{width:100%;height:330px}
       <p><b>3. “Si quedan como están”:</b> toma los números que hoy aparecen digitados en cada acta enviada al JEE y los suma a la ventaja oficial.</p>
       <p><b>4. Peor caso por anulaciones:</b> supone, de forma deliberadamente extrema, que se anulan todas las actas todavía pendientes que favorecen a RP y se conservan todas las que favorecen a AP.</p>
       <p><b>5. Lo que aún puede cambiar:</b> el JEE puede resolver observaciones y, cuando corresponda, ordenar recuentos. Por eso este radar no sustituye el resultado oficial.</p>
-      <p><b>6. No es una encuesta:</b> el bloque pendiente se calcula con las actas reales publicadas por ONPE, no con promedios de distritos.</p>
+      <p><b>6. Proyección del radar:</b> indica qué lista terminaría adelante si las actas observadas aún abiertas conservaran los valores digitados del corte. El nivel “Muy alta” se usa cuando, además, la prueba extrema de anulaciones selectivas sigue dejando al mismo líder por encima de cero.</p>
+      <p><b>7. Causales:</b> la tabla “Causa principal” es una clasificación exclusiva: cada acta aparece una sola vez. La tabla de “Problemas encontrados” no es exclusiva; una misma acta puede aportar a varias etiquetas, por eso sus cantidades no tienen que coincidir.</p>
+      <p><b>8. No es una encuesta:</b> el bloque pendiente se calcula con las actas reales publicadas por ONPE, no con promedios de distritos.</p>
     </div>
   </section>
 
@@ -739,6 +799,63 @@ function render(){
   document.getElementById('jeeLead').textContent=signed(c.unresolved_gap)+' RP';
   document.getElementById('neededShift').textContent=fmt(need)+' votos';
 
+  // PROYECCIÓN DEL RADAR
+  const projTitle=document.getElementById('projectionTitle');
+  const projSub=document.getElementById('projectionSub');
+  const projConf=document.getElementById('projectionConfidence');
+  const projWinner=document.getElementById('projectionWinner');
+  const projMargin=document.getElementById('projectionMargin');
+  const projObserved=document.getElementById('projectionObserved');
+  const projNeed=document.getElementById('projectionNeed');
+  const projNote=document.getElementById('projectionNote');
+
+  let winner='Elección abierta', conf='Abierta', confClass='open';
+
+  if(raw>0){
+    winner='Renovación Popular';
+    if(worst>0){
+      conf='Muy alta';
+      confClass='';
+    }else{
+      conf='Alta';
+      confClass='high';
+    }
+  }else if(raw<0){
+    winner='Avanza País';
+    conf='Alta';
+    confClass='high';
+  }
+
+  projWinner.textContent=winner;
+  projObserved.textContent=fmt(c.unresolved_count);
+  projNeed.textContent=fmt(need)+' votos';
+  projConf.textContent='Confianza: '+conf;
+  projConf.className='confidence '+confClass;
+
+  if(raw>0){
+    projTitle.textContent='RP terminaría adelante si las observadas mantienen los valores digitados';
+    projMargin.textContent='RP +'+fmt(raw);
+    projMargin.className='proj-value plus';
+    projSub.textContent='Proyección basada en las actas observadas reales del corte seleccionado; no es una encuesta.';
+    if(worst>0){
+      projNote.innerHTML='Con los valores digitados del corte, RP terminaría con una ventaja de <b>'+fmt(raw)+' votos</b>. Incluso en la prueba extrema que anula todas las observadas favorables a RP y conserva todas las favorables a AP, RP seguiría arriba por <b>'+fmt(worst)+' votos</b>. Para que AP pase adelante, las resoluciones o recuentos tendrían que producir un desplazamiento neto de aproximadamente <b>'+fmt(need)+' votos hacia AP</b> respecto de esos valores.';
+    }else{
+      projNote.innerHTML='Con los valores digitados del corte, RP terminaría con una ventaja de <b>'+fmt(raw)+' votos</b>. Sin embargo, la prueba extrema de anulaciones ya puede poner el resultado en zona sensible, por lo que el nivel de confianza baja.';
+    }
+  }else if(raw<0){
+    projTitle.textContent='AP terminaría adelante si las observadas mantienen los valores digitados';
+    projMargin.textContent='AP +'+fmt(-raw);
+    projMargin.className='proj-value minus';
+    projSub.textContent='Proyección basada en las actas observadas reales del corte seleccionado; no es una encuesta.';
+    projNote.innerHTML='Los valores digitados del corte favorecen a AP en la proyección. El resultado oficial todavía depende de las resoluciones del JEE.';
+  }else{
+    projTitle.textContent='Proyección prácticamente empatada';
+    projMargin.textContent='Empate';
+    projMargin.className='proj-value';
+    projSub.textContent='La diferencia proyectada es prácticamente nula en este corte.';
+    projNote.innerHTML='El bloque observado deja el resultado en una situación abierta.';
+  }
+
   const st=document.getElementById('status');
   if(gap>0 && raw>0 && worst>0){
     st.className='status';
@@ -775,9 +892,21 @@ function renderDistricts(){
   }).join('');
 }
 function renderCauses(){
-  const rows=Object.entries(cut().causes||{}).map(([name,v])=>({name,n:v[0],gap:v[3]})).sort((a,b)=>b.n-a.n);
+  const c=cut();
+  const rows=Object.entries(c.causes||{}).map(([name,v])=>({name,n:v[0],gap:v[3]})).sort((a,b)=>b.n-a.n);
+  const flags=Object.entries(c.flags||{}).sort((a,b)=>b[1]-a[1]);
+  const causeTotal=rows.reduce((s,x)=>s+(+x.n||0),0);
+  const flagTotal=flags.reduce((s,x)=>s+(+x[1]||0),0);
+
   document.querySelector('#causeTable tbody').innerHTML=rows.map(x=>`<tr><td>${esc(x.name)}</td><td>${fmt(x.n)}</td><td class="${cls(x.gap)}">${x.gap>=0?'RP +'+fmt(x.gap):'AP +'+fmt(-x.gap)}</td></tr>`).join('');
-  document.querySelector('#flagTable tbody').innerHTML=Object.entries(cut().flags||{}).sort((a,b)=>b[1]-a[1]).map(([k,v])=>`<tr><td>${esc(k)}</td><td>${fmt(v)}</td></tr>`).join('');
+  document.querySelector('#flagTable tbody').innerHTML=flags.map(([k,v])=>`<tr><td>${esc(k)}</td><td>${fmt(v)}</td></tr>`).join('');
+
+  document.getElementById('causeTotal').textContent=fmt(causeTotal);
+  document.getElementById('flagTotal').textContent=fmt(flagTotal);
+
+  const extras=Math.max(0,flagTotal-causeTotal);
+  document.getElementById('causeExplanation').innerHTML=
+    `En este corte hay <b>${fmt(causeTotal)} actas observadas</b>. La tabla izquierda suma exactamente ${fmt(causeTotal)} porque cada acta se clasifica una sola vez. La tabla derecha suma <b>${fmt(flagTotal)} etiquetas</b>: son ${fmt(extras)} apariciones adicionales porque algunas actas tienen más de un problema simultáneamente. Por ejemplo, un acta clasificada a la izquierda como <b>“Sin firmas”</b> también puede contar a la derecha dentro de <b>“Error aritmético”</b> si presenta ambos problemas.`;
 }
 function renderHistory(){
   document.querySelector('#historyTable tbody').innerHTML=[...cuts].reverse().map((c,i)=>`<tr data-idx="${cuts.length-1-i}" style="cursor:pointer"><td>${esc(c.ts)}</td><td>${signed((c.official.rp||0)-(c.official.ap||0))}</td><td>${fmt(c.unresolved_count)}</td><td>${signed(c.raw_final_gap)}</td><td>${signed(c.nullification_floor)}</td></tr>`).join('');
@@ -794,6 +923,12 @@ function drawChart(){
   function line(fn,color){ctx.strokeStyle=color;ctx.lineWidth=4;ctx.beginPath();cuts.forEach((c,i)=>{const xx=x(i),yy=y(fn(c));i?ctx.lineTo(xx,yy):ctx.moveTo(xx,yy)});ctx.stroke()}
   line(c=>(+c.official.rp||0)-(+c.official.ap||0),'#173b8e');line(c=>+c.raw_final_gap||0,'#137a4b');line(c=>+c.nullification_floor||0,'#b77a14');
 }
+document.getElementById('projectionMethodLink').onclick=()=>{
+  const btn=[...document.querySelectorAll('.tab')].find(x=>x.dataset.page==='metodo');
+  if(btn) btn.click();
+  document.getElementById('metodo').scrollIntoView({behavior:'smooth',block:'start'});
+};
+
 document.querySelectorAll('.tab').forEach(b=>b.onclick=()=>{document.querySelectorAll('.tab').forEach(x=>x.classList.remove('active'));document.querySelectorAll('.page').forEach(x=>x.classList.remove('active'));b.classList.add('active');document.getElementById(b.dataset.page).classList.add('active');if(b.dataset.page==='historico')drawChart()});
 document.getElementById('districtSearch').oninput=renderDistricts;
 document.querySelectorAll('#districtTable th').forEach(th=>th.onclick=()=>{const k=th.dataset.k;if(!k)return;if(dSort.k===k)dSort.dir*=-1;else{dSort.k=k;dSort.dir=k==='name'?1:-1}renderDistricts()});
