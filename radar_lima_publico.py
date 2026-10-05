@@ -639,7 +639,7 @@ canvas{width:100%;height:330px}
         <div class="proj-value" id="projectionObserved">—</div>
       </div>
       <div class="proj-stat">
-        <div class="proj-label">Cambio neto que necesitaría AP para pasar adelante</div>
+        <div class="proj-label">Cambio de votos necesario para que AP pase adelante</div>
         <div class="proj-value" id="projectionNeed">—</div>
       </div>
     </div>
@@ -692,7 +692,7 @@ canvas{width:100%;height:330px}
       <div class="simplecard">
         <div class="question">Para que AP pase adelante tendría que cambiar…</div>
         <div class="answer" id="neededShift">—</div>
-        <div class="explain">Votos netos respecto de lo que actualmente dicen las actas.</div>
+        <div class="explain">Diferencia necesaria respecto de los valores que actualmente figuran en las actas observadas.</div>
       </div>
     </div>
   </section>
@@ -746,7 +746,7 @@ canvas{width:100%;height:330px}
       <p><b>3. “Si quedan como están”:</b> toma los números que hoy aparecen digitados en cada acta enviada al JEE y los suma a la ventaja oficial.</p>
       <p><b>4. Peor caso por anulaciones:</b> supone, de forma deliberadamente extrema, que se anulan todas las actas todavía pendientes que favorecen a RP y se conservan todas las que favorecen a AP.</p>
       <p><b>5. Lo que aún puede cambiar:</b> el JEE puede resolver observaciones y, cuando corresponda, ordenar recuentos. Por eso este radar no sustituye el resultado oficial.</p>
-      <p><b>6. Proyección del radar:</b> indica qué lista terminaría adelante si las actas observadas aún abiertas conservaran los valores digitados del corte. El nivel “Muy alta” se usa cuando, además, la prueba extrema de anulaciones selectivas sigue dejando al mismo líder por encima de cero.</p>
+      <p><b>6. Proyección del radar:</b> indica qué lista terminaría adelante si las actas observadas que siguen pendientes de resolución conservaran los valores digitados del corte. El nivel “Muy alta” se usa cuando, además, incluso la prueba extrema de anulaciones selectivas mantiene al mismo líder.</p>
       <p><b>7. Causales:</b> la tabla “Causa principal” es una clasificación exclusiva: cada acta aparece una sola vez. La tabla de “Problemas encontrados” no es exclusiva; una misma acta puede aportar a varias etiquetas, por eso sus cantidades no tienen que coincidir.</p>
       <p><b>8. No es una encuesta:</b> el bloque pendiente se calcula con las actas reales publicadas por ONPE, no con promedios de distritos.</p>
     </div>
@@ -833,20 +833,20 @@ function render(){
   projConf.className='confidence '+confClass;
 
   if(raw>0){
-    projTitle.textContent='RP terminaría adelante si las observadas mantienen los valores digitados';
+    projTitle.textContent='RP terminaría adelante si las actas observadas mantienen los valores digitados';
     projMargin.textContent='RP +'+fmt(raw);
     projMargin.className='proj-value plus';
-    projSub.textContent='Proyección basada en las actas observadas reales del corte seleccionado; no es una encuesta.';
+    projSub.textContent='Proyección basada en los valores digitados de las actas observadas del corte seleccionado; no es una encuesta.';
     if(worst>0){
-      projNote.innerHTML='Con los valores digitados del corte, RP terminaría con una ventaja de <b>'+fmt(raw)+' votos</b>. Incluso en la prueba extrema que anula todas las observadas favorables a RP y conserva todas las favorables a AP, RP seguiría arriba por <b>'+fmt(worst)+' votos</b>. Para que AP pase adelante, las resoluciones o recuentos tendrían que producir un desplazamiento neto de aproximadamente <b>'+fmt(need)+' votos hacia AP</b> respecto de esos valores.';
+      projNote.innerHTML='Con los valores digitados del corte, RP terminaría con una ventaja de <b>'+fmt(raw)+' votos</b>. Incluso en la prueba extrema que anula todas las observadas favorables a RP y conserva todas las favorables a AP, RP seguiría arriba por <b>'+fmt(worst)+' votos</b>. Para que AP pase adelante, las resoluciones o recuentos tendrían que cambiar el resultado en aproximadamente <b>'+fmt(need)+' votos a favor de AP</b> respecto de los valores actualmente digitados.';
     }else{
       projNote.innerHTML='Con los valores digitados del corte, RP terminaría con una ventaja de <b>'+fmt(raw)+' votos</b>. Sin embargo, la prueba extrema de anulaciones ya puede poner el resultado en zona sensible, por lo que el nivel de confianza baja.';
     }
   }else if(raw<0){
-    projTitle.textContent='AP terminaría adelante si las observadas mantienen los valores digitados';
+    projTitle.textContent='AP terminaría adelante si las actas observadas mantienen los valores digitados';
     projMargin.textContent='AP +'+fmt(-raw);
     projMargin.className='proj-value minus';
-    projSub.textContent='Proyección basada en las actas observadas reales del corte seleccionado; no es una encuesta.';
+    projSub.textContent='Proyección basada en los valores digitados de las actas observadas del corte seleccionado; no es una encuesta.';
     projNote.innerHTML='Los valores digitados del corte favorecen a AP en la proyección. El resultado oficial todavía depende de las resoluciones del JEE.';
   }else{
     projTitle.textContent='Proyección prácticamente empatada';
@@ -936,6 +936,7 @@ const sel=document.getElementById('cut');sel.innerHTML=cuts.map((c,i)=>`<option 
 render();
 setTimeout(()=>location.reload(),5*60*1000);
 </script>
+<!-- Cloudflare Web Analytics --><script type='module' src='https://static.cloudflareinsights.com/beacon.min.js' data-cf-beacon='{"token": "ba8a7f01a9c9455eaad2bfc6d82bc94a"}'></script><!-- End Cloudflare Web Analytics -->
 </body>
 </html>'''
     return template.replace("__STATE__", state_json)
@@ -1047,8 +1048,8 @@ async def run_once_async(args):
     print("\n=== RADAR DE ACTAS OBSERVADAS · ERM LIMA 2026 ===")
     print(f"Oficial conciliado: RP {official_end['rp']} | AP {official_end['ap']} | brecha {official_end['rp']-official_end['ap']:+d}")
     print(f"Actas observadas aún abiertas: {snap['unresolved_count']}")
-    print(f"Saldo RP-AP dentro de observadas: {snap['unresolved_gap']:+d}")
-    print(f"Proyección raw conciliada: {snap['raw_final_gap']:+d}")
+    print(f"Diferencia RP−AP dentro de las actas observadas: {snap['unresolved_gap']:+d}")
+    print(f"Proyección conciliada: {snap['raw_final_gap']:+d}")
     print(f"Piso por anulaciones: {snap['nullification_floor']:+d}")
     print("HTML público:", HTML_PATH)
 
