@@ -1,10 +1,10 @@
 # RADAR LIMA FINAL — MONITOR JEE EN UN SOLO HTML
-# Mantiene TODO el historial dentro de radar-ERM-Lima-2026/index.html.
+# Comprueba ONPE cada hora. SOLO si cambia algo, reconcilia actas JEE y publica un corte completo.
 # No crea snapshots/CSVs/JSONs adicionales.
 #
 # Uso:
 #   python radar_lima_final.py
-#   python radar_lima_final.py --watch 3600
+#   python radar_lima_publico.py --watch 3600 --publish
 #
 # Dependencias:
 #   python -m pip install curl_cffi playwright
@@ -70,6 +70,15 @@ def first_num(obj,keys,default=None):
             except Exception:pass
     return default
 
+
+def first_text(obj, keys, default=None):
+    for k in keys:
+        if k in obj:
+            v = obj.get(k)
+            if v not in (None, ""):
+                return str(v)
+    return default
+
 class ONPE:
     def __init__(self):
         self.s=requests.Session(impersonate="chrome124")
@@ -120,11 +129,79 @@ def get_current_official():
                 cont=int(round(total*pct/100.0))
             observed=first_num(totals,["observadas","observada","actasObservadasNumero","nActasObservadas","totalActasObservadas"],None)
             pending=first_num(totals,["pendientes","pendiente","actasPendientesNumero","nActasPendientes"],None)
-            return {"rp":rp,"ap":ap,"sp":sp,"cont":cont,"total":total,"observed":observed,"pending":pending}
+            updated = first_text(
+                totals,
+                [
+                    "fechaActualizacion",
+                    "fechaHoraActualizacion",
+                    "fechaActualizacionProceso",
+                    "ultimaActualizacion",
+                    "fechaCorte",
+                    "fechaHora",
+                ],
+                None,
+            )
+            return {
+                "rp":rp,"ap":ap,"sp":sp,"cont":cont,"total":total,
+                "observed":observed,"pending":pending,
+                "updated":updated,
+            }
         except Exception as e:last=e
     raise RuntimeError(f"No pude obtener resumen provincial: {last}")
 
 STATE_RE=re.compile(r'<script id="radar-state" type="application/json">(.*?)</script>',re.S)
+
+
+def history_signature(snap):
+    """
+    Two cuts are the same for public-history purposes when nothing electoral
+    changed. Time alone NEVER creates a new cut.
+    """
+    o = snap.get("official") or {}
+    return (
+        o.get("rp"),
+        o.get("ap"),
+        o.get("cont"),
+        o.get("observed"),
+        o.get("pending"),
+        snap.get("unresolved_count"),
+        snap.get("unresolved_rp"),
+        snap.get("unresolved_ap"),
+        snap.get("unresolved_gap"),
+        snap.get("raw_final_gap"),
+        snap.get("nullification_floor"),
+    )
+
+
+def clean_history(state):
+    """
+    Always preserve the first/base cut. After that, keep only snapshots whose
+    electoral signature differs from the last retained snapshot.
+    """
+    hist = state.get("history") or []
+    if not hist:
+        return 0
+
+    kept = [hist[0]]
+    last_sig = history_signature(hist[0])
+
+    for snap in hist[1:]:
+        sig = history_signature(snap)
+        if sig != last_sig:
+            kept.append(snap)
+            last_sig = sig
+
+    removed = len(hist) - len(kept)
+    state["history"] = kept
+    return removed
+
+
+def snapshot_is_meaningful(state, snap):
+    hist = state.get("history") or []
+    if not hist:
+        return True
+    return history_signature(hist[-1]) != history_signature(snap)
+
 
 def load_state():
     if not HTML_PATH.exists():
@@ -138,7 +215,11 @@ def load_state():
     m=STATE_RE.search(txt)
     if not m:
         raise RuntimeError("El HTML público no contiene radar-state.")
-    return json.loads(html.unescape(m.group(1)))
+    state = json.loads(html.unescape(m.group(1)))
+    removed = clean_history(state)
+    if removed:
+        print(f"[histórico] Eliminados {removed} cortes de prueba/repetidos.")
+    return state
 
 def atomic_write(path,text):
     tmp=path.with_suffix(path.suffix+".tmp");tmp.write_text(text,encoding="utf-8");tmp.replace(path)
@@ -291,41 +372,75 @@ def build_quick_snapshot(state, ts, official, note=""):
     return snap
 
 
+def effective_observed_count(state, official):
+    """
+    Prefer ONPE's explicit observed count. If the summary endpoint omits it,
+    infer the remaining JEE universe as total - contabilizadas, but only because
+    our base cut established pending normal = 0 and the election had already
+    finished normal counting.
+    """
+    obs = official.get("observed")
+    if obs is not None:
+        return nint(obs, None)
+
+    total = official.get("total")
+    cont = official.get("cont")
+    if total is not None and cont is not None:
+        base = (state.get("history") or [{}])[0]
+        base_pending = (base.get("official") or {}).get("pending")
+        if base_pending == 0:
+            return max(0, nint(total) - nint(cont))
+    return None
+
+
+def official_signature(official):
+    """
+    Time is intentionally excluded. Only electoral data can trigger a new cycle.
+    """
+    return (
+        official.get("rp"),
+        official.get("ap"),
+        official.get("sp"),
+        official.get("cont"),
+        official.get("total"),
+        official.get("observed"),
+        official.get("pending"),
+    )
+
+
+def last_real_official(state):
+    hist = state.get("history") or []
+    if not hist:
+        return None
+    return hist[-1].get("official") or None
+
+
 def should_scan(state, official, args):
     if args.force_scan:
         return True, "barrido forzado"
 
-    hist = state.get("history") or []
-    last = hist[-1] if hist else None
-    if not last:
+    prev = last_real_official(state)
+    if prev is None:
         return True, "sin corte anterior"
 
-    # If ONPE exposes the count of observed/JEE actas and it changed,
-    # that is a meaningful trigger for reconciliation.
-    prev_off = last.get("official") or {}
-    old_obs = prev_off.get("observed")
-    new_obs = official.get("observed")
-    if old_obs is not None and new_obs is not None and old_obs != new_obs:
-        return True, f"actas observadas {old_obs}→{new_obs}"
+    if official_signature(prev) != official_signature(official):
+        changes = []
+        labels = {
+            "rp": "RP",
+            "ap": "AP",
+            "sp": "SP",
+            "cont": "actas contabilizadas",
+            "total": "actas totales",
+            "observed": "actas observadas",
+            "pending": "actas pendientes",
+        }
+        for k, label in labels.items():
+            if prev.get(k) != official.get(k):
+                # Ignore null-vs-null; the condition above already guarantees some difference.
+                changes.append(f"{label}: {prev.get(k)}→{official.get(k)}")
+        return True, "cambio ONPE detectado (" + "; ".join(changes) + ")"
 
-    # Otherwise, hourly updates remain LIGHT. A movement in RP/AP can simply mean
-    # JEE resolutions are being incorporated; scanning all 1,924 immediately would
-    # be wasteful and can hit ONPE protection.
-    last_scan = parse_iso(state.get("last_full_scan"))
-    if last_scan is None:
-        # The seeded 12:43 cut is already a complete reconciliation.
-        seed = last_reconciled_snapshot(state)
-        if seed:
-            state["last_full_scan"] = seed.get("analysis_at") or seed.get("ts")
-            last_scan = parse_iso(state["last_full_scan"])
-
-    if last_scan is None:
-        return True, "sin barrido completo conocido"
-
-    if datetime.now() - last_scan >= timedelta(hours=args.full_scan_hours):
-        return True, f"barrido periódico {args.full_scan_hours:g}h"
-
-    return False, "actualización rápida; no hace falta reescanear actas"
+    return False, "ONPE sin cambios"
 
 def render_html(state):
     state_json=json.dumps(state,ensure_ascii=False,separators=(",",":")).replace("</","<\\/")
@@ -334,8 +449,8 @@ def render_html(state):
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width,initial-scale=1">
-<meta name="description" content="Radar no oficial de la elección municipal de Lima 2026 basado en datos públicos de ONPE y actas enviadas al JEE.">
-<title>Radar Lima 2026</title>
+<meta name="description" content="Radar no oficial dedicado exclusivamente a las actas observadas de la ERM Lima 2026 enviadas al JEE. No reconstruye el escrutinio normal previo.">
+<title>Radar de Actas Observadas · ERM Lima 2026</title>
 <style>
 :root{
   --bg:#f3f6f8; --ink:#17212b; --muted:#6f7d8c; --card:#fff; --line:#dfe5ea;
@@ -352,6 +467,24 @@ body{margin:0;background:var(--bg);color:var(--ink);font-family:Inter,Segoe UI,A
 .brand p{margin:6px 0 0;color:var(--muted);font-size:15px}
 .cutbox{background:#fff;border:1px solid var(--line);border-radius:14px;padding:10px 12px;box-shadow:var(--shadow)}
 .cutbox label{font-size:12px;color:var(--muted);display:block;margin-bottom:5px}
+.onpe-ref{background:#fff;border:1px solid var(--line);border-radius:16px;padding:14px 16px;box-shadow:var(--shadow);margin:14px 0 16px}
+.onpe-ref-top{display:flex;gap:22px;align-items:flex-end;flex-wrap:wrap}
+.onpe-pct-wrap{min-width:145px}
+.onpe-label{font-size:12px;color:var(--muted);font-weight:700}
+.onpe-pct{font-size:36px;font-weight:900;line-height:1;color:#123a8d;margin-top:2px}
+.onpe-total{font-size:15px;font-weight:800;margin-bottom:4px}
+.onpe-sub{font-size:12px;color:var(--muted)}
+.onpe-bar{height:10px;border-radius:999px;overflow:hidden;background:#e9eef3;display:flex;margin:11px 0 9px}
+.onpe-bar .cont{background:#0a4c89}
+.onpe-bar .jee{background:#6eb7e7}
+.onpe-bar .pend{background:#dfe7ef}
+.onpe-legend{display:flex;gap:18px;flex-wrap:wrap;justify-content:flex-end;font-size:12px;color:#31445a}
+.onpe-legend span{display:inline-flex;align-items:center;gap:6px}
+.onpe-dot{width:12px;height:12px;border-radius:50%;display:inline-block;border:1px solid #0a4c89}
+.onpe-dot.cont{background:#0a4c89}
+.onpe-dot.jee{background:#6eb7e7}
+.onpe-dot.pend{background:#fff}
+.onpe-time{font-size:11px;color:var(--muted);margin-top:5px;text-transform:uppercase;letter-spacing:.02em}
 select,input{border:1px solid var(--line);background:#fff;border-radius:9px;padding:9px 11px;color:var(--ink)}
 .hero{display:grid;grid-template-columns:1fr 1fr;gap:14px;margin:14px 0}
 .candidate{min-height:240px;border-radius:22px;overflow:hidden;position:relative;box-shadow:var(--shadow);background:#fff}
@@ -409,13 +542,37 @@ canvas{width:100%;height:330px}
 <div class="wrap">
   <div class="topbar">
     <div class="brand">
-      <h1>Radar Lima 2026</h1>
-      <p>Una forma simple de entender qué falta y cuánto podría cambiar el resultado.</p>
+      <h1>Radar de Actas Observadas · ERM Lima 2026</h1>
+      <p>Seguimiento exclusivo de las actas enviadas al JEE. Este panel no reconstruye el escrutinio normal anterior.</p>
     </div>
     <div class="cutbox">
       <label>Ver un corte anterior</label>
       <select id="cut"></select>
     </div>
+  </div>
+
+  <div class="onpe-ref">
+    <div class="onpe-ref-top">
+      <div class="onpe-pct-wrap">
+        <div class="onpe-label">Actas contabilizadas</div>
+        <div class="onpe-pct" id="onpePct">—</div>
+      </div>
+      <div>
+        <div class="onpe-total">Total de actas: <span id="onpeTotal">—</span></div>
+        <div class="onpe-sub" id="onpeSub">—</div>
+      </div>
+    </div>
+    <div class="onpe-bar" aria-label="Distribución de actas">
+      <span class="cont" id="barCont"></span>
+      <span class="jee" id="barJee"></span>
+      <span class="pend" id="barPend"></span>
+    </div>
+    <div class="onpe-legend">
+      <span><i class="onpe-dot cont"></i>Contabilizadas <b id="legendCont">—</b></span>
+      <span><i class="onpe-dot jee"></i>Para envío al JEE <b id="legendJee">—</b></span>
+      <span><i class="onpe-dot pend"></i>Pendientes <b id="legendPend">—</b></span>
+    </div>
+    <div class="onpe-time" id="onpeTime">—</div>
   </div>
 
   <div class="hero">
@@ -468,12 +625,13 @@ canvas{width:100%;height:330px}
   </div>
 
   <section id="resumen" class="page active">
+    <div class="info" style="margin-bottom:12px"><b>Alcance del radar:</b> este seguimiento empieza cuando el escrutinio normal ya había terminado y el universo pendiente estaba concentrado en las actas observadas enviadas al JEE. Los resultados normales anteriores no forman parte de este histórico. <b>Cada corte guardado se publica recién después de conciliar las actas observadas</b>, de modo que Resumen, Distritos, Causales e Histórico correspondan al mismo corte.</div>
     <div class="info" id="plainExplanation"></div>
     <div class="grid" style="margin-top:12px">
       <div class="simplecard">
-        <div class="question">Actas que todavía sigue vigilando el radar</div>
+        <div class="question">Actas observadas aún abiertas</div>
         <div class="answer" id="jeeCount">—</div>
-        <div class="explain">Son las que aún no detectamos como resueltas.</div>
+        <div class="explain">Se recalculan cuando ONPE cambia y el radar concilia el bloque enviado al JEE.</div>
       </div>
       <div class="simplecard">
         <div class="question">Saldo dentro de esas actas</div>
@@ -489,7 +647,7 @@ canvas{width:100%;height:330px}
   </section>
 
   <section id="distritos" class="page">
-    <h3>Las actas observadas que quedan, por distrito</h3>
+    <h3>Actas observadas aún abiertas, por distrito</h3>
     <div style="margin-bottom:10px"><input id="districtSearch" placeholder="Buscar distrito…"></div>
     <div class="tablewrap">
       <table id="districtTable">
@@ -518,7 +676,7 @@ canvas{width:100%;height:330px}
       <span><i class="dot" style="background:#b77a14"></i>Peor caso por anulaciones</span>
     </div>
     <div class="chartbox"><canvas id="chart" width="1200" height="340"></canvas></div>
-    <h3>Cortes guardados dentro de este mismo archivo</h3>
+    <h3>Cortes reales: solo cuando cambió algo</h3>
     <div class="tablewrap">
       <table id="historyTable"><thead><tr><th>Fecha</th><th>Ventaja oficial</th><th>Actas vigiladas</th><th>Si quedan como están</th><th>Peor caso anulaciones</th></tr></thead><tbody></tbody></table>
     </div>
@@ -526,17 +684,17 @@ canvas{width:100%;height:330px}
 
   <section id="metodo" class="page">
     <div class="info">
-      <p><b>1. Ventaja oficial:</b> son los votos que ONPE ya incorporó.</p>
-      <p><b>2. “Si quedan como están”:</b> toma los números que hoy aparecen digitados en cada acta enviada al JEE y los suma a la ventaja oficial.</p>
-      <p><b>3. Peor caso por anulaciones:</b> supone, de forma deliberadamente extrema, que se anulan todas las actas todavía pendientes que favorecen a RP y se conservan todas las que favorecen a AP.</p>
-      <p><b>4. Lo que aún puede cambiar:</b> el JEE puede resolver observaciones y, cuando corresponda, ordenar recuentos. Por eso este radar no sustituye el resultado oficial.</p>
-      <p><b>5. No es una encuesta:</b> el bloque pendiente se calcula con las actas reales publicadas por ONPE, no con promedios de distritos.</p>
+      <p><b>1. Alcance:</b> este radar sigue exclusivamente las actas observadas enviadas al JEE. El corte base se tomó después de terminado el escrutinio normal.</p><p><b>2. Ventaja oficial:</b> son los votos que ONPE ya incorporó en cada corte.</p>
+      <p><b>3. “Si quedan como están”:</b> toma los números que hoy aparecen digitados en cada acta enviada al JEE y los suma a la ventaja oficial.</p>
+      <p><b>4. Peor caso por anulaciones:</b> supone, de forma deliberadamente extrema, que se anulan todas las actas todavía pendientes que favorecen a RP y se conservan todas las que favorecen a AP.</p>
+      <p><b>5. Lo que aún puede cambiar:</b> el JEE puede resolver observaciones y, cuando corresponda, ordenar recuentos. Por eso este radar no sustituye el resultado oficial.</p>
+      <p><b>6. No es una encuesta:</b> el bloque pendiente se calcula con las actas reales publicadas por ONPE, no con promedios de distritos.</p>
     </div>
   </section>
 
   <div class="footer">
     <div class="source-note">
-      <b>Fuentes:</b> datos electorales públicos de ONPE y estados de actas enviados al JEE. Este sitio es un seguimiento independiente y no oficial.<br>
+      <b>Fuentes:</b> datos electorales públicos de ONPE y estados de actas enviados al JEE. El bloque superior reproduce como referencia los indicadores esenciales del resumen de actas. Este sitio es un seguimiento independiente y no oficial.<br>
       Foto Rafael López Aliaga: “Aliaga.jpg”, Vox España, CC0, vía Wikimedia Commons.
       Foto Francis Allison: Ministerio de la Producción del Perú, marcada como dominio público en Wikimedia Commons.
     </div>
@@ -555,6 +713,23 @@ const cut=()=>cuts[currentIndex]||{};
 
 function render(){
   const c=cut(),o=c.official||{},gap=(+o.rp||0)-(+o.ap||0),raw=+c.raw_final_gap||0,worst=+c.nullification_floor||0,need=+c.required_shift||0;
+  const total=+o.total||0, cont=+o.cont||0;
+  const jee=(c.unresolved_count!==null&&c.unresolved_count!==undefined)?(+c.unresolved_count||0):(+o.observed||0);
+  const pend=(o.pending!==null&&o.pending!==undefined)?(+o.pending||0):Math.max(0,total-cont-jee);
+  const pctCont=total?100*cont/total:0, pctJee=total?100*jee/total:0, pctPend=total?100*pend/total:0;
+  document.getElementById('onpePct').textContent=pctCont.toFixed(3)+' %';
+  document.getElementById('onpeTotal').textContent=fmt(total);
+  document.getElementById('onpeSub').textContent=pctJee.toFixed(3)+' % de actas para envío al JEE y '+pctPend.toFixed(3)+' % de actas pendientes';
+  document.getElementById('barCont').style.width=pctCont+'%';
+  document.getElementById('barJee').style.width=pctJee+'%';
+  document.getElementById('barPend').style.width=pctPend+'%';
+  document.getElementById('legendCont').textContent='('+fmt(cont)+')';
+  document.getElementById('legendJee').textContent='('+fmt(jee)+')';
+  document.getElementById('legendPend').textContent='('+fmt(pend)+')';
+  const officialStamp=o.updated?String(o.updated):null;
+  document.getElementById('onpeTime').textContent=officialStamp
+    ? 'Actualización reportada por ONPE: '+officialStamp
+    : 'Corte conciliado por el radar: '+String(c.ts||'—').replace('T',' ');
   document.getElementById('rpVotes').childNodes[0].nodeValue=fmt(o.rp)+' ';
   document.getElementById('apVotes').childNodes[0].nodeValue=fmt(o.ap)+' ';
   document.getElementById('officialLead').textContent=signed(gap)+' RP';
@@ -567,7 +742,7 @@ function render(){
   const st=document.getElementById('status');
   if(gap>0 && raw>0 && worst>0){
     st.className='status';
-    st.innerHTML=`<span class="badge">● Ventaja muy difícil de revertir</span><h2>RP va adelante por <span class="biglead">${fmt(gap)} votos</span> en lo ya contabilizado.</h2><p>Las actas que faltan resolver, tomadas tal como están digitadas hoy, <b>no recortan esa ventaja: la aumentan</b>. El escenario extremo de anulaciones selectivas tampoco alcanza por sí solo para poner a AP adelante.</p>`;
+    st.innerHTML=`<span class="badge">● Ventaja muy difícil de revertir</span><h2>RP va adelante por <span class="biglead">${fmt(gap)} votos</span> en lo ya contabilizado.</h2><p>Las actas observadas aún abiertas, tomadas tal como están digitadas en el corte conciliado, <b>no recortan esa ventaja: la aumentan</b>. El escenario extremo de anulaciones selectivas tampoco alcanza por sí solo para poner a AP adelante.</p>`;
   }else if(gap>0 && raw>0){
     st.className='status warn';
     st.innerHTML=`<span class="badge" style="background:#fff1d4;color:#9a5b00">● Ventaja, pero quedan escenarios sensibles</span><h2>RP sigue adelante por ${fmt(gap)} votos.</h2><p>Las actas pendientes aún pueden ser relevantes y conviene seguirlas de cerca.</p>`;
@@ -578,7 +753,7 @@ function render(){
 
   let plain='';
   if(gap>0&&raw>0&&worst>0){
-    plain=`<b>En castellano:</b> hoy RP tiene ${fmt(gap)} votos de ventaja que ya están en el cómputo. Si las ${fmt(c.unresolved_count)} actas que el radar sigue vigilando terminaran valiendo exactamente lo que hoy aparece digitado en ellas, la ventaja subiría a <b>${fmt(raw)} votos</b>. Incluso en un ejercicio extremo donde se anulan todas las pendientes favorables a RP y se conservan todas las favorables a AP, RP seguiría arriba por <b>${fmt(worst)}</b>. Para cambiar el líder haría falta que recuentos o correcciones muevan al menos <b>${fmt(need)} votos netos hacia AP</b> respecto de lo que actualmente muestran esas actas.`;
+    plain=`<b>En castellano:</b> hoy RP tiene ${fmt(gap)} votos de ventaja que ya están en el cómputo. Si las ${fmt(c.unresolved_count)} actas observadas aún abiertas terminaran valiendo exactamente lo que aparece digitado en ellas, la ventaja subiría a <b>${fmt(raw)} votos</b>. Incluso en un ejercicio extremo donde se anulan todas las pendientes favorables a RP y se conservan todas las favorables a AP, RP seguiría arriba por <b>${fmt(worst)}</b>. Para cambiar el líder haría falta que recuentos o correcciones muevan al menos <b>${fmt(need)} votos netos hacia AP</b> respecto de lo que actualmente muestran esas actas.`;
   }else{
     plain=`Este corte todavía tiene suficiente incertidumbre como para no resumirlo en una sola frase. Mira las pestañas de distrito e histórico.`;
   }
@@ -643,7 +818,7 @@ def publish_github():
         if diff.returncode==0:
             print("[publicación] No hubo cambios para publicar.")
             return True
-        msg="Actualización Radar Lima "+datetime.now().strftime("%Y-%m-%d %H:%M")
+        msg="Actualización Radar actas observadas "+datetime.now().strftime("%Y-%m-%d %H:%M")
         subprocess.run(["git","commit","-m",msg],cwd=str(ROOT),check=True,timeout=60)
         subprocess.run(["git","push"],cwd=str(ROOT),check=True,timeout=120)
         print("[publicación] Sitio enviado a GitHub.")
@@ -658,56 +833,88 @@ def publish_github():
 async def run_once_async(args):
     state = load_state()
     print("Leyendo resumen provincial ONPE...")
-    official = get_current_official()
+    official_start = get_current_official()
 
-    do_scan, reason = should_scan(state, official, args)
+    do_scan, reason = should_scan(state, official_start, args)
 
-    if do_scan:
-        print("Revisión JEE activada:", reason)
-        scan_meta = await scan_unresolved(
+    if not do_scan:
+        print("[ONPE] Sin cambios respecto del último corte real.")
+        print("[JEE] No se escanean actas.")
+        print("[histórico] No se crea corte.")
+        print("[publicación] No se hace commit ni push.")
+        last = (state.get("history") or [{}])[-1]
+        print("\n=== RADAR DE ACTAS OBSERVADAS · ERM LIMA 2026 ===")
+        print(f"Oficial sin cambios: RP {official_start['rp']} | AP {official_start['ap']} | brecha {official_start['rp']-official_start['ap']:+d}")
+        print(f"Último corte real: {last.get('ts')}")
+        print("Próxima comprobación según la cadencia del monitor.")
+        return
+
+    print("[ONPE]", reason)
+
+    # This phase has no normal pending actas in the base snapshot. When ONPE's
+    # summary omits 'observed', total-cont gives the exact JEE remainder.
+    target_observed = effective_observed_count(state, official_start)
+    if target_observed is not None:
+        print(f"[JEE] Universo observado esperado tras el cambio: {target_observed}")
+
+    scan_meta = await scan_unresolved(
+        state,
+        target_observed,
+        args.detail_rps,
+        args.cooldown,
+    )
+    scan_meta["ran"] = True
+    scan_meta["reason"] = reason
+    scan_meta["target_observed"] = target_observed
+
+    # Read ONPE again AFTER the acta reconciliation so headline and district tabs
+    # belong to the same as-close-as-possible cut.
+    official_end = get_current_official()
+
+    # If ONPE moved again while we were scanning, try one extra reconciliation.
+    # This still respects the hourly outer cadence; it is part of the SAME cut.
+    if official_signature(official_end) != official_signature(official_start):
+        print("[ONPE] Hubo movimiento durante el escaneo. Hago una segunda conciliación del mismo corte...")
+        target2 = effective_observed_count(state, official_end)
+        scan2 = await scan_unresolved(
             state,
-            official.get("observed"),
+            target2,
             args.detail_rps,
             args.cooldown,
         )
-        scan_meta["ran"] = True
-        scan_meta["reason"] = reason
-        state["last_full_scan"] = datetime.now().isoformat(timespec="seconds")
+        scan_meta["second_pass"] = scan2
+        scan_meta["target_observed_after"] = target2
+        official_end = get_current_official()
 
-        # Releer resumen después de un barrido largo.
-        try:
-            official = get_current_official()
-        except Exception:
-            pass
+    state["last_full_scan"] = datetime.now().isoformat(timespec="seconds")
+    ts = datetime.now().isoformat(timespec="seconds")
+    snap = build_snapshot(
+        state,
+        ts,
+        official_end,
+        "Cambio detectado en ONPE; corte guardado después de conciliar las actas observadas.",
+        scan_meta,
+    )
 
-        ts = datetime.now().isoformat(timespec="seconds")
-        snap = build_snapshot(
-            state, ts, official,
-            f"Revisión completa de actas JEE: {reason}.",
-            scan_meta,
-        )
-    else:
-        print("Actualización rápida:", reason)
-        ts = datetime.now().isoformat(timespec="seconds")
-        snap = build_quick_snapshot(
-            state, ts, official,
-            "Corte horario del cómputo oficial. La proyección de observadas corresponde al último barrido completo.",
-        )
+    # Avoid a false cut if ONPE returned to exactly the previous electoral state.
+    if not snapshot_is_meaningful(state, snap):
+        print("[histórico] Tras conciliar, el estado electoral coincide con el último corte. No se guarda ni publica.")
+        return
 
     state.setdefault("history", []).append(snap)
+    clean_history(state)
     atomic_write(HTML_PATH, render_html(state))
+    print("[histórico] Cambio real conciliado: nuevo corte completo guardado.")
 
     if getattr(args, "publish", False):
         publish_github()
 
-    print("\n=== RADAR LIMA PÚBLICO ===")
-    print(f"Oficial actual: RP {official['rp']} | AP {official['ap']} | brecha {official['rp']-official['ap']:+d}")
-    if snap.get("reconciled"):
-        print(f"JEE conciliadas en este corte: {snap['unresolved_count']}")
-    else:
-        print(f"Análisis JEE reutilizado del corte: {snap.get('analysis_at')}")
-    print(f"Proyección del último barrido completo: {snap['raw_final_gap']:+d}")
-    print(f"Piso por anulaciones del último barrido: {snap['nullification_floor']:+d}")
+    print("\n=== RADAR DE ACTAS OBSERVADAS · ERM LIMA 2026 ===")
+    print(f"Oficial conciliado: RP {official_end['rp']} | AP {official_end['ap']} | brecha {official_end['rp']-official_end['ap']:+d}")
+    print(f"Actas observadas aún abiertas: {snap['unresolved_count']}")
+    print(f"Saldo RP-AP dentro de observadas: {snap['unresolved_gap']:+d}")
+    print(f"Proyección raw conciliada: {snap['raw_final_gap']:+d}")
+    print(f"Piso por anulaciones: {snap['nullification_floor']:+d}")
     print("HTML público:", HTML_PATH)
 
 def run_once(args):asyncio.run(run_once_async(args))
@@ -717,8 +924,6 @@ def main():
     ap.add_argument("--watch", type=int, default=0, metavar="SEGUNDOS")
     ap.add_argument("--force-scan", action="store_true",
                     help="Fuerza un barrido completo de las actas JEE.")
-    ap.add_argument("--full-scan-hours", type=float, default=12.0,
-                    help="Horas entre barridos completos preventivos. Default: 12.")
     ap.add_argument("--detail-rps", type=float, default=0.8)
     ap.add_argument("--cooldown", type=int, default=45)
     ap.add_argument("--render-only", action="store_true",
@@ -729,12 +934,11 @@ def main():
 
     args.detail_rps = max(.15, min(args.detail_rps, 2))
     args.cooldown = max(20, min(args.cooldown, 300))
-    args.full_scan_hours = max(1, min(args.full_scan_hours, 48))
 
     if args.render_only:
         state = load_state()
         atomic_write(HTML_PATH, render_html(state))
-        print("HTML regenerado SIN consultar ONPE:", HTML_PATH)
+        print("HTML regenerado SIN consultar ONPE y con histórico depurado:", HTML_PATH)
         return
 
     if not args.watch:
