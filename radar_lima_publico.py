@@ -1,5 +1,5 @@
 # RADAR LIMA FINAL — MONITOR JEE EN UN SOLO HTML
-# Mantiene TODO el historial dentro de index.html.
+# Mantiene TODO el historial dentro de radar-ERM-Lima-2026/index.html.
 # No crea snapshots/CSVs/JSONs adicionales.
 #
 # Uso:
@@ -31,7 +31,11 @@ DEP = "140000"
 PROV = "140100"
 
 ROOT = Path(__file__).resolve().parent
-HTML_PATH = ROOT / "index.html"
+PUBLIC_SLUG = "radar-ERM-Lima-2026"
+PUBLIC_DIR = ROOT / PUBLIC_SLUG
+PUBLIC_DIR.mkdir(parents=True, exist_ok=True)
+HTML_PATH = PUBLIC_DIR / "index.html"
+LEGACY_HTML_PATH = ROOT / "index.html"
 PROFILE_DIR = ROOT.parent / "radar_lima_starter" / "radar_lima" / "chrome_profile_hibrido"
 if not PROFILE_DIR.exists():
     PROFILE_DIR = ROOT / "radar_lima" / "chrome_profile_hibrido"
@@ -123,9 +127,17 @@ def get_current_official():
 STATE_RE=re.compile(r'<script id="radar-state" type="application/json">(.*?)</script>',re.S)
 
 def load_state():
-    if not HTML_PATH.exists():raise RuntimeError("No encuentro index.html junto al script.")
-    txt=HTML_PATH.read_text(encoding="utf-8");m=STATE_RE.search(txt)
-    if not m:raise RuntimeError("El HTML no contiene radar-state.")
+    if not HTML_PATH.exists():
+        if LEGACY_HTML_PATH.exists():
+            # Migración automática desde la antigua raíz al nuevo subdirectorio.
+            HTML_PATH.write_text(LEGACY_HTML_PATH.read_text(encoding="utf-8"), encoding="utf-8")
+            print(f"[migración] Estado copiado a {HTML_PATH}")
+        else:
+            raise RuntimeError(f"No encuentro {HTML_PATH} ni el antiguo index.html.")
+    txt=HTML_PATH.read_text(encoding="utf-8")
+    m=STATE_RE.search(txt)
+    if not m:
+        raise RuntimeError("El HTML público no contiene radar-state.")
     return json.loads(html.unescape(m.group(1)))
 
 def atomic_write(path,text):
@@ -626,7 +638,7 @@ def publish_github():
         if probe.returncode!=0:
             print("[publicación] Esta carpeta todavía no está conectada a un repositorio Git.")
             return False
-        subprocess.run(["git","add","index.html"],cwd=str(ROOT),check=True,timeout=20)
+        subprocess.run(["git","add",f"{PUBLIC_SLUG}/index.html"],cwd=str(ROOT),check=True,timeout=20)
         diff=subprocess.run(["git","diff","--cached","--quiet"],cwd=str(ROOT),timeout=20)
         if diff.returncode==0:
             print("[publicación] No hubo cambios para publicar.")
@@ -696,12 +708,12 @@ async def run_once_async(args):
         print(f"Análisis JEE reutilizado del corte: {snap.get('analysis_at')}")
     print(f"Proyección del último barrido completo: {snap['raw_final_gap']:+d}")
     print(f"Piso por anulaciones del último barrido: {snap['nullification_floor']:+d}")
-    print("HTML:", HTML_PATH)
+    print("HTML público:", HTML_PATH)
 
 def run_once(args):asyncio.run(run_once_async(args))
 
 def main():
-    ap = argparse.ArgumentParser(description="Radar Lima público — un solo HTML")
+    ap = argparse.ArgumentParser(description="Radar ERM Lima 2026 — publicación en subruta")
     ap.add_argument("--watch", type=int, default=0, metavar="SEGUNDOS")
     ap.add_argument("--force-scan", action="store_true",
                     help="Fuerza un barrido completo de las actas JEE.")
