@@ -1,5 +1,5 @@
 # RADAR LIMA FINAL — MONITOR JEE EN UN SOLO HTML
-# Comprueba ONPE cada 30 minutos. SOLO si cambia algo, localiza los distritos afectados, reconcilia sus actas JEE y publica un corte completo.
+# Comprueba ONPE cada 30 minutos. Si cambia, intenta identificar directamente las actas resueltas por el delta de votos; si no puede, usa el barrido completo de seguridad.
 # No crea snapshots/CSVs/JSONs adicionales.
 #
 # Uso:
@@ -236,412 +236,6 @@ def cause_main(c):
     if "ACTA IMPUGNADA" in n or "SOLICITUD DE NULIDAD" in n:return "Impugnación / nulidad"
     return "Otra"
 
-
-def district_catalog(state):
-    """
-    Ubigeo -> nombre para los distritos que forman parte del universo
-    de actas observadas original.
-    """
-    out = {}
-    for a in state.get("actas", {}).values():
-        u = str(a.get("u") or "")
-        d = str(a.get("d") or "")
-        if u and d:
-            out[u] = d
-    return dict(sorted(out.items(), key=lambda kv: kv[1]))
-
-
-def unresolved_by_district(state):
-    counts = {}
-    for a in state.get("actas", {}).values():
-        if a.get("s") == "JEE":
-            u = str(a.get("u") or "")
-            if u:
-                counts[u] = counts.get(u, 0) + 1
-    return counts
-
-
-def district_params(ubigeo):
-    """
-    ONPE ha aceptado distintas variantes de nombres de parámetros durante
-    este proceso. Probamos las mismas familias que ya usa el radar.
-    """
-    return [
-        {
-            "idEleccion": ID_ELECCION,
-            "idAmbitoGeografico": 1,
-            "tipoFiltro": "ubigeo_nivel_03",
-            "ubigeoNivel01": DEP,
-            "ubigeoNivel02": PROV,
-            "ubigeoNivel03": ubigeo,
-        },
-        {
-            "idEleccion": ID_ELECCION,
-            "idAmbitoGeografico": 1,
-            "tipoFiltro": "ubigeo_nivel_03",
-            "idUbigeoDepartamento": DEP,
-            "idUbigeoProvincia": PROV,
-            "idUbigeoDistrito": ubigeo,
-        },
-        {
-            "idEleccion": ID_ELECCION,
-            "idAmbitoGeografico": 1,
-            "tipoFiltro": "ubigeo_nivel_03",
-            "idUbigeo": ubigeo,
-        },
-    ]
-
-
-def parse_totals_record(totals):
-    total = first_num(totals, ["totalActas", "actasTotal", "nTotalActas"])
-    cont = first_num(totals, ["contabilizadas", "actasContabilizadasNumero", "nActasContabilizadas"])
-    pct = first_num(totals, ["actasContabilizadas", "porcentajeActasContabilizadas"])
-
-    if total and (cont is None or cont <= 100) and pct is not None and 0 <= pct <= 100:
-        cont = int(round(total * pct / 100.0))
-
-    observed = first_num(
-        totals,
-        ["observadas", "observada", "actasObservadasNumero", "nActasObservadas", "totalActasObservadas"],
-        None,
-    )
-    pending = first_num(
-        totals,
-        ["pendientes", "pendiente", "actasPendientesNumero", "nActasPendientes"],
-        None,
-    )
-
-    # En esta etapa el escrutinio normal ya terminó y el corte base tenía
-    # pendientes normales = 0. Si ONPE no expone "observadas" a nivel
-    # distrital, total - contabilizadas - pendientes identifica el bloque JEE.
-    jee = observed
-    if jee is None and total is not None and cont is not None:
-        jee = max(0, int(total) - int(cont) - int(pending or 0))
-
-    return {
-        "total": total,
-        "cont": cont,
-        "observed": observed,
-        "pending": pending,
-        "jee": jee,
-    }
-
-
-def get_district_jee_counts(state):
-    """
-    Consulta SOLO el resumen distrital (no las actas individuales).
-    Devuelve el número de actas que siguen fuera del cómputo por distrito.
-
-    Si un distrito no puede leerse con suficiente certeza, lo marca como error
-    para que el radar use el barrido completo de seguridad.
-    """
-    api = ONPE()
-    catalog = district_catalog(state)
-    result = {}
-    errors = {}
-
-    print(f"[distritos] Localizando cambios entre {len(catalog)} distritos...")
-
-    for idx, (u, name) in enumerate(catalog.items(), 1):
-        last = None
-        got = None
-        for params in district_params(u):
-            try:
-                totals = api.get("/resumen-general/totales", params, retries=3)
-                if isinstance(totals, dict):
-                    parsed = parse_totals_record(totals)
-                    if parsed.get("jee") is not None:
-                        got = parsed
-                        break
-            except Exception as e:
-                last = e
-
-        if got is None:
-            errors[u] = f"{name}: {last or 'respuesta sin conteo JEE'}"
-        else:
-            result[u] = {"name": name, **got}
-
-        if idx % 10 == 0 or idx == len(catalog):
-            print(f"[distritos] {idx}/{len(catalog)} | OK={len(result)} | errores={len(errors)}")
-
-    return result, errors
-
-
-def locate_changed_districts(state, district_now, expected_total_jee):
-    """
-    Compara el número JEE actual de cada distrito con el estado que conserva
-    el radar. Solo los distritos cuyo número bajó necesitan revisar actas.
-
-    Si la suma de los deltas distritales no explica exactamente el cambio
-    provincial, devuelve inconclusive=True y se usa el barrido completo.
-    """
-    before = unresolved_by_district(state)
-    changed = []
-    unexpected = []
-
-    for u, info in district_now.items():
-        old = int(before.get(u, 0))
-        new = nint(info.get("jee"), old)
-        delta = old - new
-
-        if delta > 0:
-            changed.append({
-                "u": u,
-                "name": info.get("name") or u,
-                "before": old,
-                "after": new,
-                "delta": delta,
-            })
-        elif delta < 0:
-            unexpected.append({
-                "u": u,
-                "name": info.get("name") or u,
-                "before": old,
-                "after": new,
-                "delta": delta,
-            })
-
-    current_total = sum(before.values())
-    expected_drop = None
-    if expected_total_jee is not None:
-        expected_drop = max(0, current_total - int(expected_total_jee))
-
-    explained = sum(x["delta"] for x in changed)
-
-    inconclusive = bool(unexpected)
-    if expected_drop is not None and explained != expected_drop:
-        inconclusive = True
-
-    return {
-        "changed": changed,
-        "unexpected": unexpected,
-        "current_total": current_total,
-        "expected_total": expected_total_jee,
-        "expected_drop": expected_drop,
-        "explained_drop": explained,
-        "inconclusive": inconclusive,
-    }
-
-
-async def scan_changed_districts(state, changes, detail_rps, cooldown):
-    """
-    Abre una sola sesión de Chrome y revisa únicamente las actas que el radar
-    todavía tiene como JEE dentro de los distritos cuyo conteo disminuyó.
-
-    Para cada distrito se detiene tan pronto encuentra exactamente la cantidad
-    de actas que sabemos que salieron del JEE.
-    """
-    if not changes:
-        return {
-            "checked": 0,
-            "changed": 0,
-            "errors": 0,
-            "districts": [],
-            "target_changed": 0,
-            "stopped_early": True,
-        }
-
-    gap_seconds = 1.0 / max(detail_rps, 0.05)
-    checked = changed_total = errors = 0
-    per_district = []
-
-    cursors = state.setdefault("district_scan_cursor", {})
-
-    async with async_playwright() as p:
-        context = await p.chromium.launch_persistent_context(
-            user_data_dir=str(PROFILE_DIR),
-            channel="chrome",
-            headless=False,
-            locale="es-PE",
-        )
-        pages = context.pages
-        page = pages[0] if pages else await context.new_page()
-
-        try:
-            await page.goto(SITE + "/main/actas", wait_until="domcontentloaded", timeout=60000)
-        except Exception:
-            print("[JEE] Chrome no terminó de cargar; sigo con la sesión.")
-
-        for item in changes:
-            u = item["u"]
-            name = item["name"]
-            target = int(item["delta"])
-
-            ids = [
-                aid
-                for aid, a in state.get("actas", {}).items()
-                if a.get("s") == "JEE" and str(a.get("u") or "") == u
-            ]
-
-            if not ids:
-                per_district.append({
-                    "u": u, "name": name, "target": target,
-                    "checked": 0, "changed": 0, "errors": 0,
-                    "complete": target == 0,
-                })
-                continue
-
-            cursor = nint(cursors.get(u), 0) % len(ids)
-            ordered = ids[cursor:] + ids[:cursor]
-
-            d_checked = d_changed = d_errors = 0
-            print(f"[JEE] {name}: busco {target} cambio(s) entre {len(ids)} actas observadas...")
-
-            for idx, aid in enumerate(ordered, 1):
-                detail, page = await fetch_detail(context, page, aid, gap_seconds, cooldown)
-                checked += 1
-                d_checked += 1
-
-                if detail is None:
-                    errors += 1
-                    d_errors += 1
-                    continue
-
-                new_status, desc = status_from_detail(detail)
-                a = state["actas"][aid]
-
-                if new_status != "JEE":
-                    if a.get("s") == "JEE":
-                        changed_total += 1
-                        d_changed += 1
-
-                    a["s"] = new_status
-                    a["last"] = {
-                        "ts": datetime.now().isoformat(timespec="seconds"),
-                        "desc": desc,
-                        "resolution": detail.get("estadoDescripcionActaResolucion"),
-                        "sub": detail.get("descripcionSubEstadoActa"),
-                    }
-
-                if idx % 25 == 0:
-                    print(
-                        f"[JEE] {name}: {idx}/{len(ordered)} | "
-                        f"encontradas={d_changed}/{target} | errores={d_errors}"
-                    )
-
-                if d_changed >= target:
-                    cursors[u] = (cursor + idx) % max(len(ids), 1)
-                    break
-
-            complete = d_changed >= target
-            per_district.append({
-                "u": u,
-                "name": name,
-                "target": target,
-                "checked": d_checked,
-                "changed": d_changed,
-                "errors": d_errors,
-                "complete": complete,
-            })
-
-            if not complete:
-                print(
-                    f"[JEE] {name}: no encontré todos los cambios esperados "
-                    f"({d_changed}/{target}); activaré barrido de seguridad."
-                )
-
-        await context.close()
-
-    return {
-        "checked": checked,
-        "changed": changed_total,
-        "errors": errors,
-        "districts": per_district,
-        "target_changed": sum(int(x["delta"]) for x in changes),
-        "stopped_early": True,
-        "complete": all(x.get("complete") for x in per_district),
-    }
-
-
-async def reconcile_differential(state, expected_total_jee, detail_rps, cooldown):
-    """
-    Estrategia V10:
-      provincia cambió -> consultar resúmenes distritales ->
-      identificar distritos que bajaron -> escanear solo esos distritos.
-
-    Cualquier inconsistencia hace fallback automático al barrido completo
-    anterior. La velocidad nunca se prioriza por encima de la coherencia.
-    """
-    district_now, errors = get_district_jee_counts(state)
-
-    if errors:
-        print(f"[distritos] {len(errors)} distrito(s) no pudieron localizarse con certeza.")
-        print("[distritos] Uso barrido completo de seguridad.")
-        full = await scan_unresolved(state, expected_total_jee, detail_rps, cooldown)
-        full["mode"] = "full_fallback"
-        full["district_errors"] = errors
-        return full
-
-    loc = locate_changed_districts(state, district_now, expected_total_jee)
-
-    if loc["unexpected"]:
-        print("[distritos] Detecté un aumento inesperado del universo JEE en algún distrito.")
-    if loc["changed"]:
-        print("[distritos] Cambios localizados:")
-        for x in loc["changed"]:
-            print(
-                f"  - {x['name']}: {x['before']} -> {x['after']} "
-                f"({x['delta']} acta(s) resuelta(s))"
-            )
-    else:
-        print("[distritos] Ningún distrito redujo su número de actas observadas.")
-
-    if loc["inconclusive"]:
-        print(
-            "[distritos] El detalle distrital no explica exactamente el cambio provincial; "
-            "uso barrido completo de seguridad."
-        )
-        full = await scan_unresolved(state, expected_total_jee, detail_rps, cooldown)
-        full["mode"] = "full_fallback"
-        full["localization"] = loc
-        return full
-
-    # Cambio oficial de votos sin reducción del universo observado:
-    # no hay ninguna acta JEE que localizar.
-    if not loc["changed"]:
-        return {
-            "mode": "district_delta",
-            "checked": 0,
-            "changed": 0,
-            "errors": 0,
-            "districts": [],
-            "localization": loc,
-            "complete": True,
-        }
-
-    diff = await scan_changed_districts(
-        state, loc["changed"], detail_rps, cooldown
-    )
-    diff["mode"] = "district_delta"
-    diff["localization"] = loc
-
-    remaining = sum(
-        1 for a in state.get("actas", {}).values()
-        if a.get("s") == "JEE"
-    )
-
-    if (
-        not diff.get("complete")
-        or (expected_total_jee is not None and remaining != int(expected_total_jee))
-    ):
-        print(
-            f"[JEE] Conciliación diferencial incompleta "
-            f"(radar={remaining}, ONPE={expected_total_jee}); "
-            "completo con barrido de seguridad."
-        )
-        full = await scan_unresolved(state, expected_total_jee, detail_rps, cooldown)
-        return {
-            "mode": "district_delta_plus_fallback",
-            "differential": diff,
-            "fallback": full,
-            "checked": diff.get("checked", 0) + full.get("checked", 0),
-            "changed": diff.get("changed", 0) + full.get("changed", 0),
-            "errors": diff.get("errors", 0) + full.get("errors", 0),
-        }
-
-    return diff
-
-
 def build_snapshot(state,ts,official,note="",scan_meta=None):
     unresolved=[a for a in state["actas"].values() if is_unresolved(a)]
     raw_rp=sum(nint(a.get("rp")) for a in unresolved);raw_ap=sum(nint(a.get("ap")) for a in unresolved)
@@ -724,6 +318,230 @@ async def scan_unresolved(state,official_observed,detail_rps,cooldown):
                 return {"checked":checked,"changed":changed,"errors":errors,"stopped_early":checked<len(ordered),"target_changed":target_changed}
         state["scan_cursor"]=(cursor+checked)%max(len(ids),1);await context.close()
     return {"checked":checked,"changed":changed,"errors":errors,"stopped_early":False,"target_changed":target_changed}
+
+
+def official_vote_delta(previous_official, current_official):
+    return {
+        "rp": nint(current_official.get("rp")) - nint(previous_official.get("rp")),
+        "ap": nint(current_official.get("ap")) - nint(previous_official.get("ap")),
+        "sp": nint(current_official.get("sp")) - nint(previous_official.get("sp")),
+    }
+
+
+def candidate_resolution_sets(state, previous_official, current_official, expected_drop):
+    """
+    Usa únicamente información YA guardada en el radar.
+
+    Si una o dos actas observadas pasan a contabilizadas sin que sus valores
+    digitados cambien, el incremento oficial RP/AP/SP debe coincidir exactamente
+    con los votos guardados de esa(s) acta(s).
+
+    Devuelve conjuntos candidatos. Nunca modifica el estado.
+    """
+    delta = official_vote_delta(previous_official, current_official)
+
+    if expected_drop not in (1, 2):
+        return [], delta, "solo intento coincidencia exacta cuando salieron 1 o 2 actas"
+
+    # Una resolución normal no debería reducir los votos oficiales.
+    if any(delta[k] < 0 for k in ("rp", "ap", "sp")):
+        return [], delta, "algún delta de votos fue negativo"
+
+    unresolved = [
+        (aid, a)
+        for aid, a in state.get("actas", {}).items()
+        if a.get("s") == "JEE"
+    ]
+
+    target = (delta["rp"], delta["ap"], delta["sp"])
+
+    if expected_drop == 1:
+        hits = []
+        for aid, a in unresolved:
+            sig = (nint(a.get("rp")), nint(a.get("ap")), nint(a.get("sp")))
+            if sig == target:
+                hits.append([aid])
+        return hits[:50], delta, None if hits else "ninguna acta coincide exactamente con el delta"
+
+    # expected_drop == 2. Búsqueda O(n) por complemento.
+    by_sig = {}
+    for aid, a in unresolved:
+        sig = (nint(a.get("rp")), nint(a.get("ap")), nint(a.get("sp")))
+        by_sig.setdefault(sig, []).append(aid)
+
+    solutions = set()
+    for aid, a in unresolved:
+        sig = (nint(a.get("rp")), nint(a.get("ap")), nint(a.get("sp")))
+        comp = (target[0]-sig[0], target[1]-sig[1], target[2]-sig[2])
+        if min(comp) < 0:
+            continue
+        for bid in by_sig.get(comp, []):
+            if bid == aid:
+                continue
+            pair = tuple(sorted((str(aid), str(bid))))
+            solutions.add(pair)
+            if len(solutions) >= 50:
+                break
+        if len(solutions) >= 50:
+            break
+
+    return [list(x) for x in solutions], delta, None if solutions else "ningún par de actas coincide exactamente con el delta"
+
+
+async def verify_candidate_set(state, ids, detail_rps, cooldown):
+    """
+    Verifica SOLO las actas candidatas. El radar no da por resuelta una acta
+    únicamente por coincidencia matemática: confirma su estado actual en ONPE.
+    """
+    gap_seconds = 1.0 / max(detail_rps, 0.05)
+    checked = changed = errors = 0
+    confirmed = []
+
+    async with async_playwright() as p:
+        context = await p.chromium.launch_persistent_context(
+            user_data_dir=str(PROFILE_DIR),
+            channel="chrome",
+            headless=False,
+            locale="es-PE",
+        )
+        pages = context.pages
+        page = pages[0] if pages else await context.new_page()
+
+        try:
+            await page.goto(SITE + "/main/actas", wait_until="domcontentloaded", timeout=60000)
+        except Exception:
+            print("[JEE] Chrome no terminó de cargar; sigo con la sesión.")
+
+        for aid in ids:
+            detail, page = await fetch_detail(context, page, aid, gap_seconds, cooldown)
+            checked += 1
+
+            if detail is None:
+                errors += 1
+                continue
+
+            new_status, desc = status_from_detail(detail)
+            a = state["actas"][str(aid)]
+
+            if new_status != "JEE":
+                if a.get("s") == "JEE":
+                    changed += 1
+                a["s"] = new_status
+                a["last"] = {
+                    "ts": datetime.now().isoformat(timespec="seconds"),
+                    "desc": desc,
+                    "resolution": detail.get("estadoDescripcionActaResolucion"),
+                    "sub": detail.get("descripcionSubEstadoActa"),
+                }
+                confirmed.append(str(aid))
+
+        await context.close()
+
+    return {
+        "checked": checked,
+        "changed": changed,
+        "errors": errors,
+        "confirmed": confirmed,
+        "complete": changed == len(ids) and errors == 0,
+    }
+
+
+async def reconcile_smart(state, previous_official, current_official, expected_total_jee, detail_rps, cooldown):
+    """
+    V10.1:
+      1) Si salió 1 o 2 actas, intenta identificarlas por el delta exacto RP/AP/SP.
+      2) Confirma en ONPE únicamente las candidatas.
+      3) Si no hay coincidencia exacta o la verificación falla, vuelve al
+         barrido completo anterior.
+
+    No usa los resúmenes distritales que resultaron no comparables con el
+    universo provincial de actas observadas.
+    """
+    current_jee = sum(
+        1 for a in state.get("actas", {}).values()
+        if a.get("s") == "JEE"
+    )
+
+    if expected_total_jee is None:
+        print("[delta] ONPE no expuso un total JEE utilizable; uso barrido completo.")
+        full = await scan_unresolved(state, expected_total_jee, detail_rps, cooldown)
+        full["mode"] = "full_fallback"
+        return full
+
+    expected_drop = current_jee - int(expected_total_jee)
+
+    if expected_drop <= 0:
+        print(f"[delta] No hay reducción del universo JEE ({current_jee} -> {expected_total_jee}); uso barrido completo.")
+        full = await scan_unresolved(state, expected_total_jee, detail_rps, cooldown)
+        full["mode"] = "full_fallback"
+        return full
+
+    sets, delta, why = candidate_resolution_sets(
+        state, previous_official, current_official, expected_drop
+    )
+
+    print(
+        f"[delta] ONPE: JEE {current_jee} -> {expected_total_jee} "
+        f"({expected_drop} acta(s)); votos: "
+        f"RP {delta['rp']:+d}, AP {delta['ap']:+d}, SP {delta['sp']:+d}"
+    )
+
+    if not sets:
+        print(f"[delta] No pude identificar las actas por coincidencia exacta: {why}.")
+        print("[delta] Uso barrido completo de seguridad.")
+        full = await scan_unresolved(state, expected_total_jee, detail_rps, cooldown)
+        full["mode"] = "full_fallback"
+        full["vote_delta"] = delta
+        return full
+
+    print(f"[delta] Encontré {len(sets)} conjunto(s) candidato(s). Verifico solo esas actas...")
+
+    # Verify candidate sets one by one. Usually there is exactly one.
+    for candidate_ids in sets:
+        labels = []
+        for aid in candidate_ids:
+            a = state["actas"].get(str(aid), {})
+            labels.append(
+                f"{a.get('d','?')} mesa {a.get('m','?')} "
+                f"(RP {nint(a.get('rp'))}, AP {nint(a.get('ap'))}, SP {nint(a.get('sp'))})"
+            )
+        print("[delta] Candidato: " + " + ".join(labels))
+
+        result = await verify_candidate_set(
+            state, candidate_ids, detail_rps, cooldown
+        )
+
+        if result.get("complete"):
+            remaining = sum(
+                1 for a in state.get("actas", {}).values()
+                if a.get("s") == "JEE"
+            )
+            if remaining == int(expected_total_jee):
+                print(
+                    f"[delta] Confirmado. Solo revisé {result['checked']} acta(s); "
+                    f"quedan {remaining} observadas."
+                )
+                return {
+                    "mode": "vote_delta_exact",
+                    "checked": result["checked"],
+                    "changed": result["changed"],
+                    "errors": result["errors"],
+                    "candidate_ids": candidate_ids,
+                    "vote_delta": delta,
+                    "target_changed": expected_drop,
+                    "stopped_early": True,
+                }
+
+        # If a candidate set was false, its verified still-JEE actas have not
+        # been mutated. Any resolved acta found is real, so keep that knowledge.
+        print("[delta] Ese conjunto no explicó completamente el cambio.")
+
+    print("[delta] Ningún conjunto candidato quedó confirmado; uso barrido completo.")
+    full = await scan_unresolved(state, expected_total_jee, detail_rps, cooldown)
+    full["mode"] = "full_fallback"
+    full["vote_delta"] = delta
+    return full
+
 
 def parse_iso(s):
     try:return datetime.fromisoformat(s)
@@ -1392,7 +1210,6 @@ async def run_once_async(args):
         return
 
     print("[ONPE]", reason)
-    print("[distritos] Antes de revisar actas, localizaré en qué distrito(s) ocurrió el cambio.")
 
     # This phase has no normal pending actas in the base snapshot. When ONPE's
     # summary omits 'observed', total-cont gives the exact JEE remainder.
@@ -1400,8 +1217,11 @@ async def run_once_async(args):
     if target_observed is not None:
         print(f"[JEE] Universo observado esperado tras el cambio: {target_observed}")
 
-    scan_meta = await reconcile_differential(
+    previous_official = last_real_official(state) or {}
+    scan_meta = await reconcile_smart(
         state,
+        previous_official,
+        official_start,
         target_observed,
         args.detail_rps,
         args.cooldown,
@@ -1419,8 +1239,10 @@ async def run_once_async(args):
     if official_signature(official_end) != official_signature(official_start):
         print("[ONPE] Hubo movimiento durante el escaneo. Hago una segunda conciliación del mismo corte...")
         target2 = effective_observed_count(state, official_end)
-        scan2 = await reconcile_differential(
+        scan2 = await reconcile_smart(
             state,
+            official_start,
+            official_end,
             target2,
             args.detail_rps,
             args.cooldown,
