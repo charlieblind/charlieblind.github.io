@@ -443,16 +443,39 @@ def rank_unresolved_candidates(state, previous_official, current_official, expec
         if a.get("s") != "JEE" or str(aid) in exclude:
             continue
 
-        # Cercanía a los votos medios de la tanda. Es solo una pista cuando hubo recuento.
-        dist = (
+        # Cercanía a los votos medios de la tanda.
+        # Si salen muchas actas pero entran muy pocos votos, es señal de anulaciones/
+        # correcciones fuertes: en ese caso esta pista pesa MUCHO menos.
+        raw_dist = (
             abs(nint(a.get("rp")) - target["rp"]) +
             abs(nint(a.get("ap")) - target["ap"]) +
             .65 * abs(nint(a.get("sp")) - target["sp"])
         )
+        avg_added = (
+            max(0, delta["rp"]) + max(0, delta["ap"]) + max(0, delta["sp"])
+        ) / max(1, expected_drop)
+        dist_weight = 0.18 if expected_drop >= 3 and avg_added < 40 else (0.45 if expected_drop >= 3 else 1.0)
+        dist = raw_dist * dist_weight
 
         d = a.get("d") or ""
         c = a.get("cm") or cause_main(a.get("c"))
-        activity_bonus = min(520, activity["districts"].get(d, 0) * 13 + activity["causes"].get(c, 0) * 3)
+        activity_bonus = min(
+            900,
+            activity["districts"].get(d, 0) * 18 +
+            activity["causes"].get(c, 0) * 5
+        )
+
+        # Si la tanda parece contener anulaciones/correcciones fuertes, prioriza
+        # causales compatibles con que un acta salga aportando pocos o cero votos.
+        causal_bonus = 0
+        if expected_drop >= 3 and avg_added < 40:
+            nc = norm(c)
+            if "NUL" in nc or "IMPUG" in nc:
+                causal_bonus += 650
+            elif "ERROR ARIT" in nc:
+                causal_bonus += 260
+            elif "ILEG" in nc or "SIN FIRMA" in nc:
+                causal_bonus += 180
 
         # Evita volver a golpear una acta que acabamos de comprobar y seguía en JEE.
         recent_penalty = 0
@@ -468,7 +491,7 @@ def rank_unresolved_candidates(state, previous_official, current_official, expec
             elif mins < 1440:
                 recent_penalty = 120
 
-        score = dist + recent_penalty - activity_bonus
+        score = dist + recent_penalty - activity_bonus - causal_bonus
         ranked.append((score, str(aid), a))
 
     ranked.sort(key=lambda x: (x[0], x[1]))
@@ -537,75 +560,204 @@ async def verify_candidate_ids(state, ids, target_changed, detail_rps, cooldown)
     }
 
 
-async def reconcile_incremental(state, previous_official, current_official, expected_total_jee, detail_rps, cooldown, batch_size=120):
+async def reconcile_incremental(
+    state,
+    previous_official,
+    current_official,
+    expected_total_jee,
+    detail_rps,
+    cooldown,
+    batch_size=120,
+    catchup_rounds=4,
+    catchup_pause=8,
+):
     """
-    Conciliación V11. Nunca convierte automáticamente una coincidencia fallida
-    en un barrido de ~1.000 actas. Trabaja por candidatos y por bloques acotados.
+    V11.1: conciliación incremental con modo "catch-up".
+
+    - Nunca dispara un barrido completo automático.
+    - Si un bloque de candidatas no alcanza, NO espera 30 minutos:
+      continúa inmediatamente con otro grupo distinto.
+    - Relee ONPE entre rondas para que el objetivo pueda moverse.
+    - Tiene un límite duro de rondas; por tanto no puede entrar en bucle infinito.
     """
     current_jee = sum(1 for a in state.get("actas", {}).values() if a.get("s") == "JEE")
     if expected_total_jee is None:
-        return {"mode":"incremental","checked":0,"changed":0,"errors":0,"complete":False,"reason":"ONPE no informó universo JEE"}
+        return {
+            "mode":"incremental",
+            "checked":0,"changed":0,"errors":0,"complete":False,
+            "reason":"ONPE no informó universo JEE"
+        }
 
     expected_total_jee = int(expected_total_jee)
     missing = current_jee - expected_total_jee
     delta = official_vote_delta(previous_official, current_official)
     print(
         f"[delta] JEE local {current_jee} -> ONPE {expected_total_jee} "
-        f"({missing:+d}); votos desde el último corte: RP {delta['rp']:+d}, AP {delta['ap']:+d}, SP {delta['sp']:+d}"
+        f"({missing:+d}); votos desde el último corte: "
+        f"RP {delta['rp']:+d}, AP {delta['ap']:+d}, SP {delta['sp']:+d}"
     )
 
     if missing == 0:
-        return {"mode":"incremental","checked":0,"changed":0,"errors":0,"complete":True,"vote_delta":delta}
+        return {
+            "mode":"incremental","checked":0,"changed":0,"errors":0,
+            "complete":True,"vote_delta":delta
+        }
     if missing < 0:
-        return {"mode":"incremental","checked":0,"changed":0,"errors":0,"complete":False,"reason":"el universo local quedó por debajo de ONPE","vote_delta":delta}
+        return {
+            "mode":"incremental","checked":0,"changed":0,"errors":0,
+            "complete":False,"reason":"el universo local quedó por debajo de ONPE",
+            "vote_delta":delta
+        }
 
     total_checked = total_changed = total_errors = 0
     tested = []
+    confirmed = []
 
-    # 1) Coincidencia exacta: barata y muy buena cuando los valores no cambiaron.
-    sets, _ = candidate_resolution_sets(state, previous_official, current_official, missing)
+    # 1) Coincidencia exacta primero.
+    sets, _ = candidate_resolution_sets(
+        state, previous_official, current_official, missing
+    )
     exact_ids = []
     for group in sets:
         for aid in group:
             if aid not in exact_ids:
                 exact_ids.append(aid)
+
     if exact_ids:
         exact_ids = exact_ids[:min(40, batch_size)]
-        print(f"[delta] {len(sets)} coincidencia(s) exacta(s); verifico primero {len(exact_ids)} acta(s) candidata(s).")
-        r = await verify_candidate_ids(state, exact_ids, missing, detail_rps, cooldown)
-        total_checked += r["checked"]; total_changed += r["changed"]; total_errors += r["errors"]
-        tested.extend(exact_ids)
-        current_jee = sum(1 for a in state.get("actas", {}).values() if a.get("s") == "JEE")
-        if current_jee == expected_total_jee:
-            return {"mode":"exact","checked":total_checked,"changed":total_changed,"errors":total_errors,"complete":True,"vote_delta":delta}
-
-    # 2) Si hubo correcciones/recuentos, la coincidencia exacta deja de servir.
-    #    Se ordenan candidatas por actividad reciente + cercanía + antigüedad de revisión.
-    remaining_missing = max(0, sum(1 for a in state.get("actas", {}).values() if a.get("s") == "JEE") - expected_total_jee)
-    remaining_budget = max(0, batch_size - total_checked)
-    if remaining_missing and remaining_budget:
-        ranked = rank_unresolved_candidates(state, previous_official, current_official, max(1, missing), exclude=tested)
-        candidates = ranked[:remaining_budget]
         print(
-            f"[JEE] Sin barrido completo: reviso un bloque máximo de {len(candidates)} candidatas "
+            f"[delta] {len(sets)} coincidencia(s) exacta(s); "
+            f"verifico primero {len(exact_ids)} acta(s) candidata(s)."
+        )
+        r = await verify_candidate_ids(
+            state, exact_ids, missing, detail_rps, cooldown
+        )
+        total_checked += r["checked"]
+        total_changed += r["changed"]
+        total_errors += r["errors"]
+        confirmed.extend(r.get("confirmed", []))
+        tested.extend(exact_ids)
+
+        current_jee = sum(
+            1 for a in state.get("actas", {}).values() if a.get("s") == "JEE"
+        )
+        if current_jee == expected_total_jee:
+            return {
+                "mode":"exact",
+                "checked":total_checked,
+                "changed":total_changed,
+                "errors":total_errors,
+                "confirmed":confirmed,
+                "complete":True,
+                "vote_delta":delta,
+                "rounds":0,
+            }
+
+    # 2) Catch-up inteligente: varios bloques consecutivos, todos distintos.
+    rounds_done = 0
+    official_round = current_official
+
+    for round_no in range(1, max(1, int(catchup_rounds)) + 1):
+        current_jee = sum(
+            1 for a in state.get("actas", {}).values() if a.get("s") == "JEE"
+        )
+        remaining_missing = current_jee - expected_total_jee
+        if remaining_missing <= 0:
+            break
+
+        rounds_done = round_no
+
+        ranked = rank_unresolved_candidates(
+            state,
+            previous_official,
+            official_round,
+            max(1, remaining_missing),
+            exclude=tested,
+        )
+        candidates = ranked[:batch_size]
+
+        if not candidates:
+            print("[JEE] No quedan candidatas nuevas para revisar en este ciclo.")
+            break
+
+        print(
+            f"[JEE] catch-up {round_no}/{catchup_rounds}: "
+            f"reviso {len(candidates)} candidatas nuevas "
             f"(faltan localizar {remaining_missing} acta(s))."
         )
-        r = await verify_candidate_ids(state, candidates, remaining_missing, detail_rps, cooldown)
-        total_checked += r["checked"]; total_changed += r["changed"]; total_errors += r["errors"]
 
-    current_jee = sum(1 for a in state.get("actas", {}).values() if a.get("s") == "JEE")
+        r = await verify_candidate_ids(
+            state, candidates, remaining_missing, detail_rps, cooldown
+        )
+        total_checked += r["checked"]
+        total_changed += r["changed"]
+        total_errors += r["errors"]
+        confirmed.extend(r.get("confirmed", []))
+        tested.extend(candidates)
+
+        # Relee ONPE después de cada ronda. Si el JEE siguió moviéndose,
+        # ajusta el objetivo sin reiniciar el proceso ni repetir candidatas.
+        try:
+            fresh = get_current_official()
+            fresh_target = effective_observed_count(state, fresh)
+            if fresh_target is not None:
+                fresh_target = int(fresh_target)
+                if fresh_target != expected_total_jee:
+                    print(
+                        f"[ONPE] El objetivo cambió durante el catch-up: "
+                        f"{expected_total_jee} -> {fresh_target}. "
+                        "Sigo desde donde estoy, sin empezar de cero."
+                    )
+                    expected_total_jee = fresh_target
+                    official_round = fresh
+        except Exception as e:
+            print(f"[ONPE] No pude refrescar el objetivo entre rondas: {e}")
+
+        current_jee = sum(
+            1 for a in state.get("actas", {}).values() if a.get("s") == "JEE"
+        )
+        if current_jee == expected_total_jee:
+            break
+
+        if round_no < catchup_rounds and catchup_pause > 0:
+            print(
+                f"[JEE] Aún faltan {current_jee-expected_total_jee}. "
+                f"Continúo con otro bloque en {catchup_pause}s; "
+                "NO espero media hora."
+            )
+            await asyncio.sleep(catchup_pause)
+
+    current_jee = sum(
+        1 for a in state.get("actas", {}).values() if a.get("s") == "JEE"
+    )
     complete = current_jee == expected_total_jee
+
+    if complete:
+        print(
+            f"[JEE] Conciliación completada en {rounds_done} ronda(s): "
+            f"{total_checked} acta(s) revisadas, {total_changed} cambio(s)."
+        )
+    else:
+        print(
+            f"[JEE] Límite del catch-up alcanzado: radar={current_jee}, "
+            f"ONPE={expected_total_jee}. No hago barrido completo; "
+            "el próximo ciclo continuará con actas distintas."
+        )
+
     return {
-        "mode":"incremental",
+        "mode":"incremental_catchup",
         "checked":total_checked,
         "changed":total_changed,
         "errors":total_errors,
+        "confirmed":confirmed,
         "complete":complete,
         "local_jee":current_jee,
         "target_jee":expected_total_jee,
         "remaining":current_jee-expected_total_jee,
-        "vote_delta":delta,
+        "vote_delta":official_vote_delta(previous_official, official_round),
         "batch_size":batch_size,
+        "rounds":rounds_done,
+        "max_rounds":catchup_rounds,
     }
 
 
@@ -1458,6 +1610,8 @@ async def run_once_async(args):
             args.detail_rps,
             args.cooldown,
             args.batch_size,
+            args.catchup_rounds,
+            args.catchup_pause,
         )
         scan_meta["settled_before_scan"] = settled
 
@@ -1535,7 +1689,11 @@ def main():
     ap.add_argument("--audit", action="store_true",
                     help="Alias explícito para una auditoría completa manual.")
     ap.add_argument("--batch-size", type=int, default=120,
-                    help="Máximo de actas que la conciliación inteligente revisa por ciclo.")
+                    help="Tamaño de cada bloque de candidatas.")
+    ap.add_argument("--catchup-rounds", type=int, default=4,
+                    help="Máximo de bloques consecutivos dentro del mismo ciclo antes de esperar la siguiente comprobación.")
+    ap.add_argument("--catchup-pause", type=int, default=8,
+                    help="Pausa en segundos entre bloques consecutivos del catch-up.")
     ap.add_argument("--settle-seconds", type=int, default=60,
                     help="Máximo de segundos para agrupar una tanda de cambios ONPE.")
     ap.add_argument("--settle-interval", type=int, default=20,
@@ -1551,6 +1709,8 @@ def main():
     args.detail_rps = max(.15, min(args.detail_rps, 2))
     args.cooldown = max(20, min(args.cooldown, 300))
     args.batch_size = max(20, min(args.batch_size, 250))
+    args.catchup_rounds = max(1, min(args.catchup_rounds, 8))
+    args.catchup_pause = max(0, min(args.catchup_pause, 60))
     args.settle_seconds = max(0, min(args.settle_seconds, 120))
     args.settle_interval = max(5, min(args.settle_interval, 60))
 
