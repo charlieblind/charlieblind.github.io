@@ -236,6 +236,36 @@ def cause_main(c):
     if "ACTA IMPUGNADA" in n or "SOLICITUD DE NULIDAD" in n:return "Impugnación / nulidad"
     return "Otra"
 
+def resolution_batch_summary(state, since_ts=None):
+    """Resume las actas que el radar detectó como resueltas desde el corte anterior."""
+    since = parse_iso(since_ts) if since_ts else None
+    rows = []
+    for aid, a in state.get("actas", {}).items():
+        if a.get("s") not in ("RESUELTA", "ANULADA"):
+            continue
+        last = a.get("last") or {}
+        dt = parse_iso(last.get("ts"))
+        if not dt or (since and dt <= since):
+            continue
+        rows.append((aid, a, dt))
+
+    districts = {}
+    causes = {}
+    for _, a, _ in rows:
+        d = a.get("d") or "Sin distrito"
+        c = a.get("cm") or cause_main(a.get("c"))
+        districts[d] = districts.get(d, 0) + 1
+        causes[c] = causes.get(c, 0) + 1
+
+    top_d = sorted(districts.items(), key=lambda kv: (-kv[1], kv[0]))[:5]
+    top_c = sorted(causes.items(), key=lambda kv: (-kv[1], kv[0]))[:5]
+    return {
+        "count": len(rows),
+        "districts": top_d,
+        "causes": top_c,
+    }
+
+
 def build_snapshot(state,ts,official,note="",scan_meta=None):
     unresolved=[a for a in state["actas"].values() if is_unresolved(a)]
     raw_rp=sum(nint(a.get("rp")) for a in unresolved);raw_ap=sum(nint(a.get("ap")) for a in unresolved)
@@ -253,7 +283,11 @@ def build_snapshot(state,ts,official,note="",scan_meta=None):
         nc=norm(a.get("c"))
         for label,pat in pats.items():
             if pat in nc:flags[label]+=1
-    return {"ts":ts,"official":official,"unresolved_count":len(unresolved),"unresolved_rp":raw_rp,"unresolved_ap":raw_ap,"unresolved_gap":raw_gap,"raw_final_gap":raw_final,"nullification_floor":null_floor,"required_shift":req,"avg_shift_per_unresolved":req/len(unresolved) if unresolved else 0,"districts":districts,"causes":causes,"flags":flags,"note":note,"scan":scan_meta or {},"reconciled":True,"analysis_at":ts}
+    prev_ts = None
+    if state.get("history"):
+        prev_ts = state["history"][-1].get("ts")
+    last_batch = resolution_batch_summary(state, prev_ts)
+    return {"ts":ts,"official":official,"unresolved_count":len(unresolved),"unresolved_rp":raw_rp,"unresolved_ap":raw_ap,"unresolved_gap":raw_gap,"raw_final_gap":raw_final,"nullification_floor":null_floor,"required_shift":req,"avg_shift_per_unresolved":req/len(unresolved) if unresolved else 0,"districts":districts,"causes":causes,"flags":flags,"last_batch":last_batch,"note":note,"scan":scan_meta or {},"reconciled":True,"analysis_at":ts}
 
 async def page_fetch(page,url):
     js = "async (url) => { try { const r=await fetch(url,{method:'GET',credentials:'include',headers:{'Accept':'application/json, text/plain, */*'}}); const text=await r.text(); return {status:r.status,contentType:r.headers.get('content-type')||'',text}; } catch(e){ return {status:0,contentType:'',text:'',error:String(e)}; } }"
@@ -308,6 +342,7 @@ async def scan_unresolved(state,official_observed,detail_rps,cooldown):
             detail,page=await fetch_detail(context,page,aid,gap_seconds,cooldown);checked+=1
             if detail is None:errors+=1;continue
             new_status,desc=status_from_detail(detail);a=state["actas"][aid]
+            a["last_checked"] = datetime.now().isoformat(timespec="seconds")
             if new_status!="JEE":
                 if a.get("s")=="JEE":changed+=1
                 a["s"]=new_status
@@ -329,30 +364,14 @@ def official_vote_delta(previous_official, current_official):
 
 
 def candidate_resolution_sets(state, previous_official, current_official, expected_drop):
-    """
-    Usa únicamente información YA guardada en el radar.
-
-    Si una o dos actas observadas pasan a contabilizadas sin que sus valores
-    digitados cambien, el incremento oficial RP/AP/SP debe coincidir exactamente
-    con los votos guardados de esa(s) acta(s).
-
-    Devuelve conjuntos candidatos. Nunca modifica el estado.
-    """
+    """Coincidencia exacta para tandas de una o dos actas."""
     delta = official_vote_delta(previous_official, current_official)
-
     if expected_drop not in (1, 2):
-        return [], delta, "solo intento coincidencia exacta cuando salieron 1 o 2 actas"
-
-    # Una resolución normal no debería reducir los votos oficiales.
+        return [], delta
     if any(delta[k] < 0 for k in ("rp", "ap", "sp")):
-        return [], delta, "algún delta de votos fue negativo"
+        return [], delta
 
-    unresolved = [
-        (aid, a)
-        for aid, a in state.get("actas", {}).items()
-        if a.get("s") == "JEE"
-    ]
-
+    unresolved = [(aid, a) for aid, a in state.get("actas", {}).items() if a.get("s") == "JEE"]
     target = (delta["rp"], delta["ap"], delta["sp"])
 
     if expected_drop == 1:
@@ -361,9 +380,8 @@ def candidate_resolution_sets(state, previous_official, current_official, expect
             sig = (nint(a.get("rp")), nint(a.get("ap")), nint(a.get("sp")))
             if sig == target:
                 hits.append([aid])
-        return hits[:50], delta, None if hits else "ninguna acta coincide exactamente con el delta"
+        return hits[:40], delta
 
-    # expected_drop == 2. Búsqueda O(n) por complemento.
     by_sig = {}
     for aid, a in unresolved:
         sig = (nint(a.get("rp")), nint(a.get("ap")), nint(a.get("sp")))
@@ -378,54 +396,121 @@ def candidate_resolution_sets(state, previous_official, current_official, expect
         for bid in by_sig.get(comp, []):
             if bid == aid:
                 continue
-            pair = tuple(sorted((str(aid), str(bid))))
-            solutions.add(pair)
-            if len(solutions) >= 50:
+            solutions.add(tuple(sorted((str(aid), str(bid)))))
+            if len(solutions) >= 30:
                 break
-        if len(solutions) >= 50:
+        if len(solutions) >= 30:
             break
+    return [list(x) for x in solutions], delta
 
-    return [list(x) for x in solutions], delta, None if solutions else "ningún par de actas coincide exactamente con el delta"
+
+def recent_activity_profile(state, limit=200):
+    rows = []
+    for aid, a in state.get("actas", {}).items():
+        if a.get("s") not in ("RESUELTA", "ANULADA"):
+            continue
+        dt = parse_iso((a.get("last") or {}).get("ts"))
+        if dt:
+            rows.append((dt, aid, a))
+    rows.sort(key=lambda x: x[0], reverse=True)
+    rows = rows[:limit]
+    districts, causes = {}, {}
+    for _, _, a in rows:
+        d = a.get("d") or ""
+        c = a.get("cm") or cause_main(a.get("c"))
+        districts[d] = districts.get(d, 0) + 1
+        causes[c] = causes.get(c, 0) + 1
+    return {"districts": districts, "causes": causes, "sample": len(rows)}
 
 
-async def verify_candidate_set(state, ids, detail_rps, cooldown):
+def rank_unresolved_candidates(state, previous_official, current_official, expected_drop, exclude=None):
     """
-    Verifica SOLO las actas candidatas. El radar no da por resuelta una acta
-    únicamente por coincidencia matemática: confirma su estado actual en ONPE.
+    Orden inteligente, NO una certeza matemática.
+    Prioriza:
+      - valores cercanos al promedio del delta oficial;
+      - distritos y causales que el JEE viene resolviendo recientemente;
+      - actas que no fueron revisadas hace poco.
     """
+    exclude = set(str(x) for x in (exclude or []))
+    delta = official_vote_delta(previous_official, current_official)
+    divisor = max(1, expected_drop)
+    target = {k: delta[k] / divisor for k in ("rp", "ap", "sp")}
+    activity = recent_activity_profile(state)
+    now = datetime.now()
+    ranked = []
+
+    for aid, a in state.get("actas", {}).items():
+        if a.get("s") != "JEE" or str(aid) in exclude:
+            continue
+
+        # Cercanía a los votos medios de la tanda. Es solo una pista cuando hubo recuento.
+        dist = (
+            abs(nint(a.get("rp")) - target["rp"]) +
+            abs(nint(a.get("ap")) - target["ap"]) +
+            .65 * abs(nint(a.get("sp")) - target["sp"])
+        )
+
+        d = a.get("d") or ""
+        c = a.get("cm") or cause_main(a.get("c"))
+        activity_bonus = min(520, activity["districts"].get(d, 0) * 13 + activity["causes"].get(c, 0) * 3)
+
+        # Evita volver a golpear una acta que acabamos de comprobar y seguía en JEE.
+        recent_penalty = 0
+        checked = parse_iso(a.get("last_checked"))
+        if checked:
+            mins = max(0, (now - checked).total_seconds() / 60)
+            if mins < 45:
+                recent_penalty = 10000
+            elif mins < 180:
+                recent_penalty = 1800
+            elif mins < 720:
+                recent_penalty = 450
+            elif mins < 1440:
+                recent_penalty = 120
+
+        score = dist + recent_penalty - activity_bonus
+        ranked.append((score, str(aid), a))
+
+    ranked.sort(key=lambda x: (x[0], x[1]))
+    return [aid for _, aid, _ in ranked]
+
+
+async def verify_candidate_ids(state, ids, target_changed, detail_rps, cooldown):
+    """Revisa una lista acotada y se detiene tan pronto encuentra las salidas esperadas."""
+    if not ids or target_changed <= 0:
+        return {"checked":0,"changed":0,"errors":0,"confirmed":[],"complete":target_changed<=0}
+
     gap_seconds = 1.0 / max(detail_rps, 0.05)
     checked = changed = errors = 0
     confirmed = []
 
     async with async_playwright() as p:
         context = await p.chromium.launch_persistent_context(
-            user_data_dir=str(PROFILE_DIR),
-            channel="chrome",
-            headless=False,
-            locale="es-PE",
+            user_data_dir=str(PROFILE_DIR), channel="chrome", headless=False, locale="es-PE"
         )
         pages = context.pages
         page = pages[0] if pages else await context.new_page()
-
         try:
-            await page.goto(SITE + "/main/actas", wait_until="domcontentloaded", timeout=60000)
+            await page.goto(SITE+"/main/actas", wait_until="domcontentloaded", timeout=60000)
         except Exception:
             print("[JEE] Chrome no terminó de cargar; sigo con la sesión.")
 
-        for aid in ids:
+        for idx, aid in enumerate(ids, 1):
+            a = state.get("actas", {}).get(str(aid))
+            if not a or a.get("s") != "JEE":
+                continue
+
+            a["last_attempt"] = datetime.now().isoformat(timespec="seconds")
             detail, page = await fetch_detail(context, page, aid, gap_seconds, cooldown)
             checked += 1
-
             if detail is None:
                 errors += 1
                 continue
 
+            a["last_checked"] = datetime.now().isoformat(timespec="seconds")
             new_status, desc = status_from_detail(detail)
-            a = state["actas"][str(aid)]
-
             if new_status != "JEE":
-                if a.get("s") == "JEE":
-                    changed += 1
+                changed += 1
                 a["s"] = new_status
                 a["last"] = {
                     "ts": datetime.now().isoformat(timespec="seconds"),
@@ -434,6 +519,12 @@ async def verify_candidate_set(state, ids, detail_rps, cooldown):
                     "sub": detail.get("descripcionSubEstadoActa"),
                 }
                 confirmed.append(str(aid))
+                print(f"[JEE] RESUELTA: {a.get('d','?')} mesa {a.get('m','?')} · {a.get('cm') or cause_main(a.get('c'))}")
+
+            if idx % 25 == 0:
+                print(f"[JEE] bloque inteligente {idx}/{len(ids)} | cambios={changed}/{target_changed} | errores={errors}")
+            if changed >= target_changed:
+                break
 
         await context.close()
 
@@ -442,105 +533,107 @@ async def verify_candidate_set(state, ids, detail_rps, cooldown):
         "changed": changed,
         "errors": errors,
         "confirmed": confirmed,
-        "complete": changed == len(ids) and errors == 0,
+        "complete": changed >= target_changed,
     }
 
 
-async def reconcile_smart(state, previous_official, current_official, expected_total_jee, detail_rps, cooldown):
+async def reconcile_incremental(state, previous_official, current_official, expected_total_jee, detail_rps, cooldown, batch_size=120):
     """
-    V10.1:
-      1) Si salió 1 o 2 actas, intenta identificarlas por el delta exacto RP/AP/SP.
-      2) Confirma en ONPE únicamente las candidatas.
-      3) Si no hay coincidencia exacta o la verificación falla, vuelve al
-         barrido completo anterior.
-
-    No usa los resúmenes distritales que resultaron no comparables con el
-    universo provincial de actas observadas.
+    Conciliación V11. Nunca convierte automáticamente una coincidencia fallida
+    en un barrido de ~1.000 actas. Trabaja por candidatos y por bloques acotados.
     """
-    current_jee = sum(
-        1 for a in state.get("actas", {}).values()
-        if a.get("s") == "JEE"
-    )
-
+    current_jee = sum(1 for a in state.get("actas", {}).values() if a.get("s") == "JEE")
     if expected_total_jee is None:
-        print("[delta] ONPE no expuso un total JEE utilizable; uso barrido completo.")
-        full = await scan_unresolved(state, expected_total_jee, detail_rps, cooldown)
-        full["mode"] = "full_fallback"
-        return full
+        return {"mode":"incremental","checked":0,"changed":0,"errors":0,"complete":False,"reason":"ONPE no informó universo JEE"}
 
-    expected_drop = current_jee - int(expected_total_jee)
-
-    if expected_drop <= 0:
-        print(f"[delta] No hay reducción del universo JEE ({current_jee} -> {expected_total_jee}); uso barrido completo.")
-        full = await scan_unresolved(state, expected_total_jee, detail_rps, cooldown)
-        full["mode"] = "full_fallback"
-        return full
-
-    sets, delta, why = candidate_resolution_sets(
-        state, previous_official, current_official, expected_drop
-    )
-
+    expected_total_jee = int(expected_total_jee)
+    missing = current_jee - expected_total_jee
+    delta = official_vote_delta(previous_official, current_official)
     print(
-        f"[delta] ONPE: JEE {current_jee} -> {expected_total_jee} "
-        f"({expected_drop} acta(s)); votos: "
-        f"RP {delta['rp']:+d}, AP {delta['ap']:+d}, SP {delta['sp']:+d}"
+        f"[delta] JEE local {current_jee} -> ONPE {expected_total_jee} "
+        f"({missing:+d}); votos desde el último corte: RP {delta['rp']:+d}, AP {delta['ap']:+d}, SP {delta['sp']:+d}"
     )
 
-    if not sets:
-        print(f"[delta] No pude identificar las actas por coincidencia exacta: {why}.")
-        print("[delta] Uso barrido completo de seguridad.")
-        full = await scan_unresolved(state, expected_total_jee, detail_rps, cooldown)
-        full["mode"] = "full_fallback"
-        full["vote_delta"] = delta
-        return full
+    if missing == 0:
+        return {"mode":"incremental","checked":0,"changed":0,"errors":0,"complete":True,"vote_delta":delta}
+    if missing < 0:
+        return {"mode":"incremental","checked":0,"changed":0,"errors":0,"complete":False,"reason":"el universo local quedó por debajo de ONPE","vote_delta":delta}
 
-    print(f"[delta] Encontré {len(sets)} conjunto(s) candidato(s). Verifico solo esas actas...")
+    total_checked = total_changed = total_errors = 0
+    tested = []
 
-    # Verify candidate sets one by one. Usually there is exactly one.
-    for candidate_ids in sets:
-        labels = []
-        for aid in candidate_ids:
-            a = state["actas"].get(str(aid), {})
-            labels.append(
-                f"{a.get('d','?')} mesa {a.get('m','?')} "
-                f"(RP {nint(a.get('rp'))}, AP {nint(a.get('ap'))}, SP {nint(a.get('sp'))})"
-            )
-        print("[delta] Candidato: " + " + ".join(labels))
+    # 1) Coincidencia exacta: barata y muy buena cuando los valores no cambiaron.
+    sets, _ = candidate_resolution_sets(state, previous_official, current_official, missing)
+    exact_ids = []
+    for group in sets:
+        for aid in group:
+            if aid not in exact_ids:
+                exact_ids.append(aid)
+    if exact_ids:
+        exact_ids = exact_ids[:min(40, batch_size)]
+        print(f"[delta] {len(sets)} coincidencia(s) exacta(s); verifico primero {len(exact_ids)} acta(s) candidata(s).")
+        r = await verify_candidate_ids(state, exact_ids, missing, detail_rps, cooldown)
+        total_checked += r["checked"]; total_changed += r["changed"]; total_errors += r["errors"]
+        tested.extend(exact_ids)
+        current_jee = sum(1 for a in state.get("actas", {}).values() if a.get("s") == "JEE")
+        if current_jee == expected_total_jee:
+            return {"mode":"exact","checked":total_checked,"changed":total_changed,"errors":total_errors,"complete":True,"vote_delta":delta}
 
-        result = await verify_candidate_set(
-            state, candidate_ids, detail_rps, cooldown
+    # 2) Si hubo correcciones/recuentos, la coincidencia exacta deja de servir.
+    #    Se ordenan candidatas por actividad reciente + cercanía + antigüedad de revisión.
+    remaining_missing = max(0, sum(1 for a in state.get("actas", {}).values() if a.get("s") == "JEE") - expected_total_jee)
+    remaining_budget = max(0, batch_size - total_checked)
+    if remaining_missing and remaining_budget:
+        ranked = rank_unresolved_candidates(state, previous_official, current_official, max(1, missing), exclude=tested)
+        candidates = ranked[:remaining_budget]
+        print(
+            f"[JEE] Sin barrido completo: reviso un bloque máximo de {len(candidates)} candidatas "
+            f"(faltan localizar {remaining_missing} acta(s))."
         )
+        r = await verify_candidate_ids(state, candidates, remaining_missing, detail_rps, cooldown)
+        total_checked += r["checked"]; total_changed += r["changed"]; total_errors += r["errors"]
 
-        if result.get("complete"):
-            remaining = sum(
-                1 for a in state.get("actas", {}).values()
-                if a.get("s") == "JEE"
-            )
-            if remaining == int(expected_total_jee):
-                print(
-                    f"[delta] Confirmado. Solo revisé {result['checked']} acta(s); "
-                    f"quedan {remaining} observadas."
-                )
-                return {
-                    "mode": "vote_delta_exact",
-                    "checked": result["checked"],
-                    "changed": result["changed"],
-                    "errors": result["errors"],
-                    "candidate_ids": candidate_ids,
-                    "vote_delta": delta,
-                    "target_changed": expected_drop,
-                    "stopped_early": True,
-                }
+    current_jee = sum(1 for a in state.get("actas", {}).values() if a.get("s") == "JEE")
+    complete = current_jee == expected_total_jee
+    return {
+        "mode":"incremental",
+        "checked":total_checked,
+        "changed":total_changed,
+        "errors":total_errors,
+        "complete":complete,
+        "local_jee":current_jee,
+        "target_jee":expected_total_jee,
+        "remaining":current_jee-expected_total_jee,
+        "vote_delta":delta,
+        "batch_size":batch_size,
+    }
 
-        # If a candidate set was false, its verified still-JEE actas have not
-        # been mutated. Any resolved acta found is real, so keep that knowledge.
-        print("[delta] Ese conjunto no explicó completamente el cambio.")
 
-    print("[delta] Ningún conjunto candidato quedó confirmado; uso barrido completo.")
-    full = await scan_unresolved(state, expected_total_jee, detail_rps, cooldown)
-    full["mode"] = "full_fallback"
-    full["vote_delta"] = delta
-    return full
+def wait_for_quiet_official(initial, max_wait=60, interval=20):
+    """
+    Debounce con tope duro. Dos lecturas consecutivas iguales => empieza antes.
+    Aunque ONPE siga moviéndose, JAMÁS espera más de max_wait segundos.
+    """
+    max_wait = max(0, int(max_wait))
+    interval = max(5, int(interval))
+    if max_wait == 0:
+        return initial, False
+
+    started = time.monotonic()
+    previous = initial
+    print(f"[ONPE] Agrupo la tanda por hasta {max_wait}s (dos lecturas iguales bastan; no reinicio el reloj).")
+    while True:
+        remaining = max_wait - (time.monotonic() - started)
+        if remaining <= 0:
+            print("[ONPE] Se alcanzó el límite de espera; tomo el último estado disponible.")
+            return previous, False
+        time.sleep(min(interval, remaining))
+        current = get_current_official()
+        if official_signature(current) == official_signature(previous):
+            print("[ONPE] Dos lecturas consecutivas iguales. Empiezo la conciliación.")
+            return current, True
+        print("[ONPE] Hubo otro movimiento dentro de la misma tanda; actualizo el objetivo sin reiniciar el reloj.")
+        previous = current
 
 
 def parse_iso(s):
@@ -771,6 +864,27 @@ canvas{width:100%;height:330px}
 .footer{margin:30px 0 10px;color:var(--muted);font-size:11px;line-height:1.55}
 .source-note{border-top:1px solid var(--line);padding-top:12px}
 .badge{display:inline-flex;align-items:center;gap:6px;border-radius:999px;padding:6px 10px;font-size:12px;font-weight:800;background:#e9f6ef;color:var(--good)}
+.radar-state{display:flex;align-items:center;justify-content:space-between;gap:12px;flex-wrap:wrap;background:#fff;border:1px solid var(--line);border-radius:14px;padding:11px 14px;box-shadow:var(--shadow);margin:0 0 14px;font-size:12px}
+.radar-state.ok{border-left:5px solid var(--good)}
+.radar-state.pending{border-left:5px solid #d99000;background:#fffaf0}
+.state-main{font-weight:850}.state-sub{color:var(--muted)}
+.progress-card{background:#fff;border:1px solid var(--line);border-radius:18px;padding:17px 19px;box-shadow:var(--shadow);margin:14px 0}
+.progress-head{display:flex;justify-content:space-between;gap:16px;align-items:flex-end;flex-wrap:wrap}
+.progress-title{font-size:13px;font-weight:850}.progress-pct{font-size:30px;font-weight:950;color:var(--rp2)}
+.progress-track{height:13px;border-radius:999px;background:#e8edf1;overflow:hidden;margin:11px 0 8px}
+.progress-fill{height:100%;background:linear-gradient(90deg,var(--rp2),var(--rp));border-radius:999px}
+.progress-meta{display:flex;justify-content:space-between;gap:12px;flex-wrap:wrap;font-size:12px;color:var(--muted)}
+.delta-panel{background:#fff;border:1px solid var(--line);border-radius:18px;padding:17px 19px;box-shadow:var(--shadow);margin:12px 0}
+.delta-panel h3{margin:0 0 4px}.delta-sub{font-size:12px;color:var(--muted);margin-bottom:12px}
+.delta-grid{display:grid;grid-template-columns:repeat(4,1fr);gap:9px}
+.delta-chip{background:#f7f9fb;border:1px solid #e7ecef;border-radius:12px;padding:11px 12px}
+.delta-chip .k{font-size:11px;color:var(--muted);font-weight:750}.delta-chip .v{font-size:20px;font-weight:900;margin-top:4px}
+.batch-box{margin-top:12px;padding-top:11px;border-top:1px solid var(--line);font-size:12px;line-height:1.55;color:#425466}
+.evo-summary{display:grid;grid-template-columns:repeat(4,1fr);gap:10px;margin:12px 0}
+.evo-card{background:#fff;border:1px solid var(--line);border-radius:14px;padding:13px 14px;box-shadow:var(--shadow)}
+.evo-card .k{font-size:11px;color:var(--muted);font-weight:750}.evo-card .v{font-size:21px;font-weight:900;margin-top:5px}
+@media(max-width:900px){.delta-grid,.evo-summary{grid-template-columns:1fr 1fr}}
+@media(max-width:560px){.delta-grid,.evo-summary{grid-template-columns:1fr}}
 @media(max-width:800px){
   .hero{grid-template-columns:1fr}
   .grid{grid-template-columns:1fr}
@@ -790,6 +904,11 @@ canvas{width:100%;height:330px}
       <label>Ver un corte anterior</label>
       <select id="cut"></select>
     </div>
+  </div>
+
+  <div class="radar-state ok" id="radarStateBar">
+    <div><span class="state-main" id="radarStateMain">● Datos conciliados</span><div class="state-sub" id="radarStateSub">ONPE y el análisis de actas corresponden al mismo corte.</div></div>
+    <div class="state-sub" id="radarStateTime">—</div>
   </div>
 
   <div class="onpe-ref">
@@ -872,6 +991,17 @@ canvas{width:100%;height:330px}
     <button class="projection-link" id="projectionMethodLink">¿Cómo se calcula?</button>
   </div>
 
+  <div class="progress-card">
+    <div class="progress-head">
+      <div>
+        <div class="progress-title">Actas observadas resueltas desde el corte base</div>
+        <div class="state-sub">Avance dentro de las 1,924 actas que dieron origen a este radar.</div>
+      </div>
+      <div class="progress-pct" id="observedProgressPct">—</div>
+    </div>
+    <div class="progress-track"><div class="progress-fill" id="observedProgressFill" style="width:0%"></div></div>
+    <div class="progress-meta"><span id="observedResolvedText">—</span><span id="observedOpenText">—</span></div>
+  </div>
 
   <div class="grid">
     <div class="simplecard">
@@ -885,22 +1015,33 @@ canvas{width:100%;height:330px}
       <div class="explain">Sumamos literalmente los números que hoy figuran en esas actas; no es una encuesta ni una extrapolación.</div>
     </div>
     <div class="simplecard">
-      <div class="question">¿Y en un peor caso de anulaciones contra RP?</div>
+      <div class="question">¿Qué pasa en el escenario extremo de anulaciones?</div>
       <div class="answer" id="worstLead">—</div>
       <div class="explain">Anulamos todas las observadas que hoy favorecen a RP y dejamos todas las que favorecen a AP. No incluye cambios por recuento.</div>
     </div>
   </div>
 
   <div class="tabs">
-    <button class="tab active" data-page="resumen">Qué significa</button>
-    <button class="tab" data-page="distritos">Distrito por distrito</button>
-    <button class="tab" data-page="causas">Por qué están observadas</button>
-    <button class="tab" data-page="historico">Cómo va cambiando</button>
-    <button class="tab" data-page="metodo">Cómo se calcula</button>
+    <button class="tab active" data-page="resumen">Resumen</button>
+    <button class="tab" data-page="distritos">Distritos</button>
+    <button class="tab" data-page="causas">Motivos de observación</button>
+    <button class="tab" data-page="historico">Evolución</button>
+    <button class="tab" data-page="metodo">Metodología</button>
   </div>
 
   <section id="resumen" class="page active">
-    <div class="info" style="margin-bottom:12px"><b>Alcance del radar:</b> este seguimiento empieza cuando el escrutinio normal ya había terminado y el universo pendiente estaba concentrado en las actas observadas enviadas al JEE. Los resultados normales anteriores no forman parte de este histórico. <b>Cada corte guardado se publica recién después de conciliar las actas observadas</b>, de modo que Resumen, Distritos, Causales e Histórico correspondan al mismo corte.</div>
+    <div class="info" style="margin-bottom:12px"><b>Alcance del radar:</b> este seguimiento empieza cuando el escrutinio normal ya había terminado y el universo pendiente estaba concentrado en las actas observadas enviadas al JEE. Los resultados normales anteriores no forman parte de este histórico. <b>Cada corte histórico se guarda solo después de conciliar las actas observadas.</b></div>
+    <div class="delta-panel" id="deltaPanel">
+      <h3>Qué cambió desde el corte anterior</h3>
+      <div class="delta-sub" id="deltaSub">—</div>
+      <div class="delta-grid">
+        <div class="delta-chip"><div class="k">Actas observadas resueltas</div><div class="v" id="deltaResolved">—</div></div>
+        <div class="delta-chip"><div class="k">Cambio en la ventaja oficial</div><div class="v" id="deltaOfficial">—</div></div>
+        <div class="delta-chip"><div class="k">Cambio del saldo pendiente</div><div class="v" id="deltaPending">—</div></div>
+        <div class="delta-chip"><div class="k">Cambio de la proyección final</div><div class="v" id="deltaProjection">—</div></div>
+      </div>
+      <div class="batch-box" id="lastBatchText">—</div>
+    </div>
     <div class="info" id="plainExplanation"></div>
     <div class="grid" style="margin-top:12px">
       <div class="simplecard">
@@ -951,16 +1092,21 @@ canvas{width:100%;height:330px}
   </section>
 
   <section id="historico" class="page">
-    <h3>Cómo ha cambiado la ventaja</h3>
+    <h3>Evolución del conteo y de la proyección</h3>
+    <div class="evo-summary">
+      <div class="evo-card"><div class="k">Proyección inicial</div><div class="v" id="evoInitial">—</div></div>
+      <div class="evo-card"><div class="k">Proyección del corte elegido</div><div class="v" id="evoCurrent">—</div></div>
+      <div class="evo-card"><div class="k">Variación desde el inicio</div><div class="v" id="evoVariation">—</div></div>
+      <div class="evo-card"><div class="k">Escenario extremo de anulaciones</div><div class="v" id="evoFloor">—</div></div>
+    </div>
     <div class="legend">
-      <span><i class="dot" style="background:#173b8e"></i>Ventaja ya contabilizada</span>
-      <span><i class="dot" style="background:#137a4b"></i>Si las observadas quedan como están</span>
-      <span><i class="dot" style="background:#b77a14"></i>Peor caso por anulaciones</span>
+      <span><i class="dot" style="background:#173b8e"></i>Ventaja oficial RP−AP</span>
+      <span><i class="dot" style="background:#137a4b"></i>Proyección final del radar</span>
     </div>
     <div class="chartbox"><canvas id="chart" width="1200" height="340"></canvas></div>
     <h3>Cortes reales: solo cuando cambió algo</h3>
     <div class="tablewrap">
-      <table id="historyTable"><thead><tr><th>Fecha</th><th>Ventaja oficial</th><th>Actas vigiladas</th><th>Si quedan como están</th><th>Peor caso anulaciones</th></tr></thead><tbody></tbody></table>
+      <table id="historyTable"><thead><tr><th>Fecha</th><th>Ventaja oficial</th><th>Actas vigiladas</th><th>Si quedan como están</th><th>Escenario extremo</th></tr></thead><tbody></tbody></table>
     </div>
   </section>
 
@@ -968,7 +1114,7 @@ canvas{width:100%;height:330px}
     <div class="info">
       <p><b>1. Alcance:</b> este radar sigue exclusivamente las actas observadas enviadas al JEE. El corte base se tomó después de terminado el escrutinio normal.</p><p><b>2. Ventaja oficial:</b> son los votos que ONPE ya incorporó en cada corte.</p>
       <p><b>3. “Si quedan como están”:</b> toma los números que hoy aparecen digitados en cada acta enviada al JEE y los suma a la ventaja oficial.</p>
-      <p><b>4. Peor caso por anulaciones:</b> supone, de forma deliberadamente extrema, que se anulan todas las actas todavía pendientes que favorecen a RP y se conservan todas las que favorecen a AP.</p>
+      <p><b>4. Escenario extremo de anulaciones:</b> supone, de forma deliberadamente extrema, que se anulan todas las actas todavía pendientes que favorecen a RP y se conservan todas las que favorecen a AP.</p>
       <p><b>5. Lo que aún puede cambiar:</b> el JEE puede resolver observaciones y, cuando corresponda, ordenar recuentos. Por eso este radar no sustituye el resultado oficial.</p>
       <p><b>6. Proyección del radar:</b> indica qué lista terminaría adelante si las actas observadas que siguen pendientes de resolución conservaran los valores digitados del corte. El nivel “Muy alta” se usa cuando, además, incluso la prueba extrema de anulaciones selectivas mantiene al mismo líder.</p>
       <p><b>7. Causales:</b> la tabla “Causa principal” es una clasificación exclusiva: cada acta aparece una sola vez. La tabla de “Problemas encontrados” no es exclusiva; una misma acta puede aportar a varias etiquetas, por eso sus cantidades no tienen que coincidir.</p>
@@ -988,7 +1134,7 @@ canvas{width:100%;height:330px}
 <script id="radar-state" type="application/json">__STATE__</script>
 <script>
 const STATE=JSON.parse(document.getElementById('radar-state').textContent);
-const cuts=STATE.history||[]; let currentIndex=Math.max(0,cuts.length-1); let dSort={k:'gap',dir:-1};
+const cuts=STATE.history||[]; const LIVE=STATE.live||null; let currentIndex=Math.max(0,cuts.length-1); let dSort={k:'gap',dir:-1};
 const fmt=n=>(n===null||n===undefined||Number.isNaN(+n))?'—':Math.round(+n).toLocaleString('es-PE');
 const signed=n=>(n===null||n===undefined)?'—':((+n>0?'+':'')+fmt(n));
 const cls=n=>(+n>0?'plus':(+n<0?'minus':''));
@@ -996,9 +1142,13 @@ const esc=s=>String(s??'').replace(/[&<>"']/g,m=>({'&':'&amp;','<':'&lt;','>':'&
 const cut=()=>cuts[currentIndex]||{};
 
 function render(){
-  const c=cut(),o=c.official||{},gap=(+o.rp||0)-(+o.ap||0),raw=+c.raw_final_gap||0,worst=+c.nullification_floor||0,need=+c.required_shift||0;
+  const c=cut(), isLatest=currentIndex===cuts.length-1;
+  const pending=!!(isLatest && LIVE && LIVE.pending);
+  const o=(pending && LIVE.official)?LIVE.official:(c.official||{});
+  const gap=(+o.rp||0)-(+o.ap||0),raw=+c.raw_final_gap||0,worst=+c.nullification_floor||0,need=+c.required_shift||0;
   const total=+o.total||0, cont=+o.cont||0;
-  const jee=(c.unresolved_count!==null&&c.unresolved_count!==undefined)?(+c.unresolved_count||0):(+o.observed||0);
+  const analysisJee=(c.unresolved_count!==null&&c.unresolved_count!==undefined)?(+c.unresolved_count||0):(+o.observed||0);
+  const jee=(pending && LIVE.target_observed!==null && LIVE.target_observed!==undefined)?(+LIVE.target_observed||0):analysisJee;
   const pend=(o.pending!==null&&o.pending!==undefined)?(+o.pending||0):Math.max(0,total-cont-jee);
   const pctCont=total?100*cont/total:0, pctJee=total?100*jee/total:0, pctPend=total?100*pend/total:0;
   document.getElementById('onpePct').textContent=pctCont.toFixed(3)+' %';
@@ -1014,12 +1164,32 @@ function render(){
   document.getElementById('onpeTime').textContent=officialStamp
     ? 'Actualización reportada por ONPE: '+officialStamp
     : 'Corte conciliado por el radar: '+String(c.ts||'—').replace('T',' ');
+  const stateBar=document.getElementById('radarStateBar');
+  if(pending){
+    stateBar.className='radar-state pending';
+    document.getElementById('radarStateMain').textContent='◐ Conciliación pendiente';
+    document.getElementById('radarStateSub').textContent='ONPE ya cambió. Las cifras oficiales de arriba están actualizadas; la proyección y el análisis detallado conservan el último corte completamente conciliado.';
+    document.getElementById('radarStateTime').textContent='Último análisis completo: '+String(LIVE.analysis_at||c.ts||'—').replace('T',' ');
+  }else{
+    stateBar.className='radar-state ok';
+    document.getElementById('radarStateMain').textContent='● Datos conciliados';
+    document.getElementById('radarStateSub').textContent='ONPE y el análisis de actas observadas corresponden al mismo corte.';
+    document.getElementById('radarStateTime').textContent=String(c.ts||'—').replace('T',' ');
+  }
+
+  const initialObserved=cuts.length?(+cuts[0].unresolved_count||0):0;
+  const resolvedObserved=Math.max(0,initialObserved-jee);
+  const progressPct=initialObserved?100*resolvedObserved/initialObserved:0;
+  document.getElementById('observedProgressPct').textContent=progressPct.toFixed(1)+' %';
+  document.getElementById('observedProgressFill').style.width=Math.max(0,Math.min(100,progressPct))+'%';
+  document.getElementById('observedResolvedText').textContent=fmt(resolvedObserved)+' resueltas de '+fmt(initialObserved);
+  document.getElementById('observedOpenText').textContent=fmt(jee)+' aún abiertas';
   document.getElementById('rpVotes').childNodes[0].nodeValue=fmt(o.rp)+' ';
   document.getElementById('apVotes').childNodes[0].nodeValue=fmt(o.ap)+' ';
   document.getElementById('officialLead').textContent=signed(gap)+' RP';
   document.getElementById('projectedLead').textContent=signed(raw)+' RP';
   document.getElementById('worstLead').textContent=signed(worst)+' RP';
-  document.getElementById('jeeCount').textContent=fmt(c.unresolved_count);
+  document.getElementById('jeeCount').textContent=fmt(jee);
   document.getElementById('jeeLead').textContent=signed(c.unresolved_gap)+' RP';
   document.getElementById('neededShift').textContent=fmt(need)+' votos';
 
@@ -1051,7 +1221,7 @@ function render(){
   }
 
   projWinner.textContent=winner;
-  projObserved.textContent=fmt(c.unresolved_count);
+  projObserved.textContent=fmt(analysisJee);
   projNeed.textContent=fmt(need)+' votos';
   projConf.textContent='Confianza: '+conf;
   projConf.className='confidence '+confClass;
@@ -1060,7 +1230,7 @@ function render(){
     projTitle.textContent='RP terminaría adelante si las actas observadas mantienen los valores digitados';
     projMargin.textContent='RP +'+fmt(raw);
     projMargin.className='proj-value plus';
-    projSub.textContent='Proyección basada en los valores digitados de las actas observadas del corte seleccionado; no es una encuesta.';
+    projSub.textContent=pending?'Proyección del último corte completamente conciliado ('+String(c.ts||'—').replace('T',' ')+'). ONPE tiene un movimiento más reciente que el radar todavía está conciliando.':'Proyección basada en los valores digitados de las actas observadas del corte seleccionado; no es una encuesta.';
     if(worst>0){
       projNote.innerHTML='Con los valores digitados del corte, RP terminaría con una ventaja de <b>'+fmt(raw)+' votos</b>. Incluso en la prueba extrema que anula todas las observadas favorables a RP y conserva todas las favorables a AP, RP seguiría arriba por <b>'+fmt(worst)+' votos</b>. Para que AP pase adelante, las resoluciones o recuentos tendrían que cambiar el resultado en aproximadamente <b>'+fmt(need)+' votos a favor de AP</b> respecto de los valores actualmente digitados.';
     }else{
@@ -1070,7 +1240,7 @@ function render(){
     projTitle.textContent='AP terminaría adelante si las actas observadas mantienen los valores digitados';
     projMargin.textContent='AP +'+fmt(-raw);
     projMargin.className='proj-value minus';
-    projSub.textContent='Proyección basada en los valores digitados de las actas observadas del corte seleccionado; no es una encuesta.';
+    projSub.textContent=pending?'Proyección del último corte completamente conciliado ('+String(c.ts||'—').replace('T',' ')+'). ONPE tiene un movimiento más reciente que el radar todavía está conciliando.':'Proyección basada en los valores digitados de las actas observadas del corte seleccionado; no es una encuesta.';
     projNote.innerHTML='Los valores digitados del corte favorecen a AP en la proyección. El resultado oficial todavía depende de las resoluciones del JEE.';
   }else{
     projTitle.textContent='Proyección prácticamente empatada';
@@ -1081,7 +1251,10 @@ function render(){
   }
 
   const st=document.getElementById('status');
-  if(gap>0 && raw>0 && worst>0){
+  if(pending){
+    st.className='status warn';
+    st.innerHTML=`<span class="badge" style="background:#fff1d4;color:#9a5b00">◐ ONPE se movió; conciliación en curso</span><h2>RP va adelante por <span class="biglead">${fmt(gap)} votos</span> en el dato oficial más reciente.</h2><p>El radar ya detectó el cambio, pero todavía no mezcla esa cifra con una canasta de actas observadas antigua. La proyección que ves debajo corresponde al último corte completamente conciliado.</p>`;
+  }else if(gap>0 && raw>0 && worst>0){
     st.className='status';
     st.innerHTML=`<span class="badge">● Ventaja muy difícil de revertir</span><h2>RP va adelante por <span class="biglead">${fmt(gap)} votos</span> en lo ya contabilizado.</h2><p>Las actas observadas aún abiertas, tomadas tal como están digitadas en el corte conciliado, <b>no recortan esa ventaja: la aumentan</b>. El escenario extremo de anulaciones selectivas tampoco alcanza por sí solo para poner a AP adelante.</p>`;
   }else if(gap>0 && raw>0){
@@ -1093,13 +1266,61 @@ function render(){
   }
 
   let plain='';
-  if(gap>0&&raw>0&&worst>0){
+  if(pending){
+    plain=`<b>Estado actual:</b> ONPE reporta una brecha oficial de ${fmt(gap)} votos para RP. El análisis de actas observadas todavía corresponde al corte conciliado de <b>${String(c.ts||'—').replace('T',' ')}</b>. El radar continuará la conciliación por bloques sin iniciar automáticamente un barrido total.`;
+  }else if(gap>0&&raw>0&&worst>0){
     plain=`<b>En castellano:</b> hoy RP tiene ${fmt(gap)} votos de ventaja que ya están en el cómputo. Si las ${fmt(c.unresolved_count)} actas observadas aún abiertas terminaran valiendo exactamente lo que aparece digitado en ellas, la ventaja subiría a <b>${fmt(raw)} votos</b>. Incluso en un ejercicio extremo donde se anulan todas las pendientes favorables a RP y se conservan todas las favorables a AP, RP seguiría arriba por <b>${fmt(worst)}</b>. Para cambiar el líder haría falta que recuentos o correcciones muevan al menos <b>${fmt(need)} votos netos hacia AP</b> respecto de lo que actualmente muestran esas actas.`;
   }else{
     plain=`Este corte todavía tiene suficiente incertidumbre como para no resumirlo en una sola frase. Mira las pestañas de distrito e histórico.`;
   }
   document.getElementById('plainExplanation').innerHTML=plain;
-  renderDistricts(); renderCauses(); renderHistory();
+  renderChangePanel(); renderDistricts(); renderCauses(); renderHistory(); renderEvolutionSummary();
+}
+
+function describeOfficialDelta(n){
+  if(!n)return 'Sin cambio';
+  return n>0?'RP amplió '+fmt(n):'AP recortó '+fmt(-n);
+}
+function describePendingDelta(n){
+  if(!n)return 'Sin cambio';
+  return n>0?'Se movió '+fmt(n)+' hacia RP':'Se movió '+fmt(-n)+' hacia AP';
+}
+function renderChangePanel(){
+  const c=cut(), idx=currentIndex;
+  const sub=document.getElementById('deltaSub');
+  if(idx<=0){
+    sub.textContent='Este es el corte base del radar.';
+    ['deltaResolved','deltaOfficial','deltaPending','deltaProjection'].forEach(id=>document.getElementById(id).textContent='—');
+    document.getElementById('lastBatchText').textContent='A partir del siguiente corte se muestran los cambios respecto de esta base.';
+    return;
+  }
+  const p=cuts[idx-1], gap=x=>(+x.official.rp||0)-(+x.official.ap||0);
+  const resolved=(+p.unresolved_count||0)-(+c.unresolved_count||0);
+  const dOfficial=gap(c)-gap(p);
+  const dPending=(+c.unresolved_gap||0)-(+p.unresolved_gap||0);
+  const dProj=(+c.raw_final_gap||0)-(+p.raw_final_gap||0);
+  sub.textContent='Comparación entre '+String(p.ts||'').replace('T',' ')+' y '+String(c.ts||'').replace('T',' ')+'.';
+  document.getElementById('deltaResolved').textContent=fmt(Math.max(0,resolved));
+  document.getElementById('deltaOfficial').textContent=describeOfficialDelta(dOfficial);
+  document.getElementById('deltaPending').textContent=describePendingDelta(dPending);
+  document.getElementById('deltaProjection').textContent=signed(dProj)+' votos';
+  const b=c.last_batch||{};
+  if(b.count){
+    const cs=(b.causes||[]).slice(0,3).map(x=>esc(x[0])+' ('+fmt(x[1])+')').join(' · ');
+    const ds=(b.districts||[]).slice(0,3).map(x=>esc(x[0])+' ('+fmt(x[1])+')').join(' · ');
+    document.getElementById('lastBatchText').innerHTML='<b>Última tanda detectada:</b> '+fmt(b.count)+' actas. <b>Motivos principales:</b> '+(cs||'—')+'. <b>Distritos principales:</b> '+(ds||'—')+'.';
+  }else{
+    document.getElementById('lastBatchText').textContent='El detalle de motivos y distritos de la última tanda se guardará automáticamente en los nuevos cortes creados por V11.';
+  }
+}
+function renderEvolutionSummary(){
+  if(!cuts.length)return;
+  const first=cuts[0], c=cut();
+  const initial=+first.raw_final_gap||0, current=+c.raw_final_gap||0;
+  document.getElementById('evoInitial').textContent=signed(initial)+' RP';
+  document.getElementById('evoCurrent').textContent=signed(current)+' RP';
+  document.getElementById('evoVariation').textContent=signed(current-initial)+' votos';
+  document.getElementById('evoFloor').textContent=signed(+c.nullification_floor||0)+' RP';
 }
 
 function districtRows(){
@@ -1140,12 +1361,12 @@ function renderHistory(){
 function drawChart(){
   const cv=document.getElementById('chart'),ctx=cv.getContext('2d'),W=cv.width,H=cv.height;ctx.clearRect(0,0,W,H);ctx.fillStyle='#fff';ctx.fillRect(0,0,W,H);
   if(!cuts.length)return;
-  const vals=[];cuts.forEach(c=>vals.push((+c.official.rp||0)-(+c.official.ap||0),+c.raw_final_gap||0,+c.nullification_floor||0));
+  const vals=[];cuts.forEach(c=>vals.push((+c.official.rp||0)-(+c.official.ap||0),+c.raw_final_gap||0));
   let min=Math.min(...vals,0),max=Math.max(...vals,1),pad=(max-min)*.12||1000;min-=pad;max+=pad;
   const x=i=>55+(W-90)*(cuts.length===1?.5:i/(cuts.length-1)),y=v=>20+(H-50)*(1-(v-min)/(max-min));
   ctx.strokeStyle='#e1e6ea';ctx.lineWidth=1;for(let j=0;j<5;j++){let yy=20+j*(H-50)/4;ctx.beginPath();ctx.moveTo(55,yy);ctx.lineTo(W-35,yy);ctx.stroke()}
   function line(fn,color){ctx.strokeStyle=color;ctx.lineWidth=4;ctx.beginPath();cuts.forEach((c,i)=>{const xx=x(i),yy=y(fn(c));i?ctx.lineTo(xx,yy):ctx.moveTo(xx,yy)});ctx.stroke()}
-  line(c=>(+c.official.rp||0)-(+c.official.ap||0),'#173b8e');line(c=>+c.raw_final_gap||0,'#137a4b');line(c=>+c.nullification_floor||0,'#b77a14');
+  line(c=>(+c.official.rp||0)-(+c.official.ap||0),'#173b8e');line(c=>+c.raw_final_gap||0,'#137a4b');
 }
 document.getElementById('projectionMethodLink').onclick=()=>{
   const btn=[...document.querySelectorAll('.tab')].find(x=>x.dataset.page==='metodo');
@@ -1193,9 +1414,9 @@ def publish_github():
 async def run_once_async(args):
     state = load_state()
     print("Leyendo resumen provincial ONPE...")
-    official_start = get_current_official()
+    official_initial = get_current_official()
 
-    do_scan, reason = should_scan(state, official_start, args)
+    do_scan, reason = should_scan(state, official_initial, args)
 
     if not do_scan:
         print("[ONPE] Sin cambios respecto del último corte real.")
@@ -1204,54 +1425,76 @@ async def run_once_async(args):
         print("[publicación] No se hace commit ni push.")
         last = (state.get("history") or [{}])[-1]
         print("\n=== RADAR DE ACTAS OBSERVADAS · ERM LIMA 2026 ===")
-        print(f"Oficial sin cambios: RP {official_start['rp']} | AP {official_start['ap']} | brecha {official_start['rp']-official_start['ap']:+d}")
+        print(f"Oficial sin cambios: RP {official_initial['rp']} | AP {official_initial['ap']} | brecha {official_initial['rp']-official_initial['ap']:+d}")
         print(f"Último corte real: {last.get('ts')}")
         print("Próxima comprobación según la cadencia del monitor.")
         return
 
     print("[ONPE]", reason)
 
-    # This phase has no normal pending actas in the base snapshot. When ONPE's
-    # summary omits 'observed', total-cont gives the exact JEE remainder.
-    target_observed = effective_observed_count(state, official_start)
-    if target_observed is not None:
-        print(f"[JEE] Universo observado esperado tras el cambio: {target_observed}")
+    # Un barrido total solo ocurre si el usuario lo pide expresamente.
+    force_full = bool(getattr(args, "force_scan", False) or getattr(args, "audit", False))
 
-    previous_official = last_real_official(state) or {}
-    scan_meta = await reconcile_smart(
-        state,
-        previous_official,
-        official_start,
-        target_observed,
-        args.detail_rps,
-        args.cooldown,
-    )
+    if force_full:
+        official_work = official_initial
+        target_observed = effective_observed_count(state, official_work)
+        print("[AUDITORÍA] Barrido completo solicitado manualmente.")
+        scan_meta = await scan_unresolved(state, target_observed, args.detail_rps, args.cooldown)
+        scan_meta["mode"] = "manual_full_audit"
+        scan_meta["complete"] = True
+    else:
+        official_work, settled = wait_for_quiet_official(
+            official_initial, args.settle_seconds, args.settle_interval
+        )
+        target_observed = effective_observed_count(state, official_work)
+        if target_observed is not None:
+            print(f"[JEE] Universo observado objetivo: {target_observed}")
+        previous_official = last_real_official(state) or {}
+        scan_meta = await reconcile_incremental(
+            state,
+            previous_official,
+            official_work,
+            target_observed,
+            args.detail_rps,
+            args.cooldown,
+            args.batch_size,
+        )
+        scan_meta["settled_before_scan"] = settled
+
     scan_meta["ran"] = True
     scan_meta["reason"] = reason
     scan_meta["target_observed"] = target_observed
 
-    # Read ONPE again AFTER the acta reconciliation so headline and district tabs
-    # belong to the same as-close-as-possible cut.
+    # Una sola lectura final. Si ONPE volvió a moverse NO iniciamos otro barrido.
     official_end = get_current_official()
+    target_end = effective_observed_count(state, official_end)
+    local_jee = sum(1 for a in state.get("actas", {}).values() if a.get("s") == "JEE")
+    complete = target_end is not None and local_jee == int(target_end)
 
-    # If ONPE moved again while we were scanning, try one extra reconciliation.
-    # This still respects the hourly outer cadence; it is part of the SAME cut.
-    if official_signature(official_end) != official_signature(official_start):
-        print("[ONPE] Hubo movimiento durante el escaneo. Hago una segunda conciliación del mismo corte...")
-        target2 = effective_observed_count(state, official_end)
-        scan2 = await reconcile_smart(
-            state,
-            official_start,
-            official_end,
-            target2,
-            args.detail_rps,
-            args.cooldown,
+    if not complete:
+        last_reconciled = last_reconciled_snapshot(state) or {}
+        state["live"] = {
+            "pending": True,
+            "official": official_end,
+            "target_observed": target_end,
+            "local_unresolved": local_jee,
+            "remaining_to_locate": (local_jee - int(target_end)) if target_end is not None else None,
+            "analysis_at": last_reconciled.get("ts"),
+            "updated_at": datetime.now().isoformat(timespec="seconds"),
+            "scan": scan_meta,
+        }
+        atomic_write(HTML_PATH, render_html(state))
+        print(
+            f"[JEE] Conciliación parcial: radar={local_jee}, ONPE={target_end}. "
+            "Guardo progreso y NO hago un barrido completo automático."
         )
-        scan_meta["second_pass"] = scan2
-        scan_meta["target_observed_after"] = target2
-        official_end = get_current_official()
+        print("[histórico] No se crea corte completo hasta que ambos universos coincidan.")
+        if getattr(args, "publish", False):
+            publish_github()
+        return
 
-    state["last_full_scan"] = datetime.now().isoformat(timespec="seconds")
+    state.pop("live", None)
+    state["last_reconciliation"] = datetime.now().isoformat(timespec="seconds")
     ts = datetime.now().isoformat(timespec="seconds")
     snap = build_snapshot(
         state,
@@ -1261,9 +1504,9 @@ async def run_once_async(args):
         scan_meta,
     )
 
-    # Avoid a false cut if ONPE returned to exactly the previous electoral state.
     if not snapshot_is_meaningful(state, snap):
-        print("[histórico] Tras conciliar, el estado electoral coincide con el último corte. No se guarda ni publica.")
+        atomic_write(HTML_PATH, render_html(state))
+        print("[histórico] Tras conciliar, el estado electoral coincide con el último corte. No se agrega otro corte.")
         return
 
     state.setdefault("history", []).append(snap)
@@ -1279,7 +1522,7 @@ async def run_once_async(args):
     print(f"Actas observadas aún abiertas: {snap['unresolved_count']}")
     print(f"Diferencia RP−AP dentro de las actas observadas: {snap['unresolved_gap']:+d}")
     print(f"Proyección conciliada: {snap['raw_final_gap']:+d}")
-    print(f"Piso por anulaciones: {snap['nullification_floor']:+d}")
+    print(f"Escenario extremo de anulaciones: {snap['nullification_floor']:+d}")
     print("HTML público:", HTML_PATH)
 
 def run_once(args):asyncio.run(run_once_async(args))
@@ -1289,6 +1532,14 @@ def main():
     ap.add_argument("--watch", type=int, default=0, metavar="SEGUNDOS")
     ap.add_argument("--force-scan", action="store_true",
                     help="Fuerza un barrido completo de las actas JEE.")
+    ap.add_argument("--audit", action="store_true",
+                    help="Alias explícito para una auditoría completa manual.")
+    ap.add_argument("--batch-size", type=int, default=120,
+                    help="Máximo de actas que la conciliación inteligente revisa por ciclo.")
+    ap.add_argument("--settle-seconds", type=int, default=60,
+                    help="Máximo de segundos para agrupar una tanda de cambios ONPE.")
+    ap.add_argument("--settle-interval", type=int, default=20,
+                    help="Intervalo entre lecturas durante la agrupación de una tanda.")
     ap.add_argument("--detail-rps", type=float, default=0.8)
     ap.add_argument("--cooldown", type=int, default=45)
     ap.add_argument("--render-only", action="store_true",
@@ -1299,6 +1550,9 @@ def main():
 
     args.detail_rps = max(.15, min(args.detail_rps, 2))
     args.cooldown = max(20, min(args.cooldown, 300))
+    args.batch_size = max(20, min(args.batch_size, 250))
+    args.settle_seconds = max(0, min(args.settle_seconds, 120))
+    args.settle_interval = max(5, min(args.settle_interval, 60))
 
     if args.render_only:
         state = load_state()
