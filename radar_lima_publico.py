@@ -1043,6 +1043,36 @@ canvas{width:100%;height:330px}
   .candidate{min-height:215px}
   .candidate .content{max-width:72%;padding:18px}
 }
+
+.top-actions{display:flex;align-items:center;justify-content:flex-end;gap:10px}
+.ghostbtn{display:inline-flex;align-items:center;justify-content:center;padding:11px 14px;border-radius:12px;border:1px solid var(--line);background:#fff;color:#173b8e;font-weight:800;text-decoration:none;box-shadow:var(--shadow);white-space:nowrap}
+.ghostbtn:hover{background:#f5f8ff}
+.timeline-card{background:#fff;border:1px solid var(--line);border-radius:18px;box-shadow:var(--shadow);padding:12px 14px 14px;margin:14px 0 18px}
+.timeline-head{display:flex;align-items:flex-start;justify-content:space-between;gap:12px;margin-bottom:10px}
+.timeline-kicker{font-size:12px;font-weight:900;color:#173b8e;text-transform:uppercase;letter-spacing:.04em}
+.timeline-subtitle{font-size:12px;color:var(--muted)}
+.timeline{display:flex;align-items:flex-start;gap:0;overflow-x:auto;padding:10px 4px 4px 4px;scrollbar-width:thin}
+.timeline::-webkit-scrollbar{height:8px}.timeline::-webkit-scrollbar-thumb{background:#d8dee6;border-radius:999px}
+.t-item{position:relative;border:0;background:transparent;cursor:pointer;padding:0 10px 0 0;min-width:84px;flex:0 0 auto;text-align:left}
+.t-item:first-child{padding-left:6px}
+.t-item::before{content:"";position:absolute;left:0;right:0;top:11px;height:2px;background:#dbe3ef;z-index:0}
+.t-item:first-child::before{left:18px}.t-item:last-child::before{right:18px}
+.t-dot{position:relative;z-index:2;display:block;width:14px;height:14px;border-radius:999px;background:#9fb3cf;border:2px solid #fff;box-shadow:0 0 0 2px #dbe3ef;margin-bottom:8px}
+.t-item.active .t-dot{background:#173b8e;box-shadow:0 0 0 3px #9fc1ff}.t-item.latest .t-dot{background:#137a4b}
+.t-label{position:relative;z-index:2;display:block;font-size:11px;line-height:1.2;color:#516074;font-weight:750;padding-right:6px}
+.t-item.active .t-label{color:#173b8e}.t-item:hover .t-label{text-decoration:underline}
+.district-legend{display:flex;flex-wrap:wrap;gap:16px;margin:0 0 12px 0;font-size:12px;color:#475467;font-weight:700}
+.district-dot{display:inline-block;width:11px;height:11px;border-radius:999px;margin-right:7px;vertical-align:-1px}.district-dot.rp{background:#57c5ff}.district-dot.ap{background:#173b8e}
+.district-chart{background:#fff;border:1px solid var(--line);border-radius:16px;padding:12px;box-shadow:var(--shadow)}
+.district-chart-empty{font-size:13px;color:var(--muted);padding:10px 2px}
+.drow{display:grid;grid-template-columns:190px 1fr 120px;gap:14px;align-items:center;padding:8px 0;border-bottom:1px solid #eef2f6}
+.drow:last-child{border-bottom:none}
+.dname{font-size:13px;font-weight:850;color:#1f2c3d;line-height:1.15}.dcount{display:block;font-size:11px;font-weight:700;color:#667085;margin-top:4px}
+.dzone{position:relative;height:22px;border-radius:999px;background:linear-gradient(90deg,#f5f7fb 0%,#f8fafc 100%);overflow:visible}
+.dzero{position:absolute;left:50%;top:-4px;bottom:-4px;width:2px;background:#d0d7e2;border-radius:999px}
+.dbar{position:absolute;top:3px;height:16px;border-radius:999px}.dbar.rp{left:50%;background:#57c5ff}.dbar.ap{right:50%;background:#173b8e}
+.dmeta{text-align:right;font-size:12px;font-weight:900}.dmeta.rp{color:#0b6ea8}.dmeta.ap{color:#173b8e}.dmeta.tie{color:#667085}
+@media(max-width:900px){.drow{grid-template-columns:1fr;gap:8px}.dmeta{text-align:left}.top-actions{justify-content:flex-start;width:100%}.timeline-card{padding:12px}}
 </style>
 </head>
 <body>
@@ -1052,9 +1082,12 @@ canvas{width:100%;height:330px}
       <h1>Radar de Actas Observadas · ERM Lima 2026</h1>
       <p>Seguimiento exclusivo de las actas enviadas al JEE. Este panel no reconstruye el escrutinio normal anterior.</p>
     </div>
-    <div class="cutbox">
-      <label>Ver un corte anterior</label>
-      <select id="cut"></select>
+    <div class="top-actions">
+      <a class="ghostbtn" href="https://resultadoelectoral.onpe.gob.pe/main/actas" target="_blank" rel="noopener">Ver conteo oficial ONPE ↗</a>
+      <div class="cutbox" style="display:none">
+        <label>Ver un corte anterior</label>
+        <select id="cut"></select>
+      </div>
     </div>
   </div>
 
@@ -1085,6 +1118,16 @@ canvas{width:100%;height:330px}
       <span><i class="onpe-dot pend"></i>Pendientes <b id="legendPend">—</b></span>
     </div>
     <div class="onpe-time" id="onpeTime">—</div>
+  </div>
+
+  <div class="timeline-card">
+    <div class="timeline-head">
+      <div>
+        <div class="timeline-kicker">Línea de tiempo de cortes</div>
+        <div class="timeline-subtitle">Haz clic en cualquier punto para abrir ese corte. El más reciente queda al extremo derecho.</div>
+      </div>
+    </div>
+    <div id="timeline" class="timeline"></div>
   </div>
 
   <div class="hero">
@@ -1216,13 +1259,15 @@ canvas{width:100%;height:330px}
 
   <section id="distritos" class="page">
     <h3>Actas observadas aún abiertas, por distrito</h3>
-    <div style="margin-bottom:10px"><input id="districtSearch" placeholder="Buscar distrito…"></div>
-    <div class="tablewrap">
-      <table id="districtTable">
-        <thead><tr><th data-k="name">Distrito</th><th data-k="n">Actas</th><th data-k="rp">RP</th><th data-k="ap">AP</th><th data-k="gap">Quién gana ahí</th></tr></thead>
-        <tbody></tbody>
-      </table>
+    <div class="info" style="margin-bottom:12px">
+      Cada barra resume el <b>saldo neto RP−AP</b> dentro de las actas observadas que siguen abiertas en cada distrito. <b>Celeste = Renovación Popular</b> y <b>azul oscuro = Avanza País</b>. La longitud muestra qué tanto favorece ese bloque pendiente a uno u otro lado; la cifra de la derecha indica cuántas actas observadas aún siguen abiertas en ese distrito.
     </div>
+    <div style="margin-bottom:12px"><input id="districtSearch" placeholder="Buscar distrito…"></div>
+    <div class="district-legend">
+      <span><i class="district-dot rp"></i>Bloque pendiente favorable a Renovación Popular</span>
+      <span><i class="district-dot ap"></i>Bloque pendiente favorable a Avanza País</span>
+    </div>
+    <div id="districtChart" class="district-chart"></div>
   </section>
 
   <section id="causas" class="page">
@@ -1426,6 +1471,7 @@ function render(){
     plain=`Este corte todavía tiene suficiente incertidumbre como para no resumirlo en una sola frase. Mira las pestañas de distrito e histórico.`;
   }
   document.getElementById('plainExplanation').innerHTML=plain;
+  renderTimeline();
   renderChangePanel(); renderDistricts(); renderCauses(); renderHistory(); renderEvolutionSummary();
 }
 
@@ -1475,17 +1521,52 @@ function renderEvolutionSummary(){
   document.getElementById('evoFloor').textContent=signed(+c.nullification_floor||0)+' RP';
 }
 
+function renderTimeline(){
+  const host=document.getElementById('timeline');
+  if(!host)return;
+  host.innerHTML=cuts.map((c,i)=>{
+    const s=String(c.ts||'').replace('T',' ');
+    const label=s.length>=16?s.slice(5,16):s;
+    const active=i===currentIndex?' active':'';
+    const latest=i===cuts.length-1?' latest':'';
+    return `<button class="t-item${active}${latest}" data-idx="${i}" title="${esc(s)}"><span class="t-dot"></span><span class="t-label">${esc(label)}</span></button>`;
+  }).join('');
+  host.querySelectorAll('.t-item').forEach(btn=>btn.onclick=()=>{
+    currentIndex=+btn.dataset.idx;
+    const sel=document.getElementById('cut');
+    if(sel)sel.value=currentIndex;
+    render();
+  });
+  const active=host.querySelector('.t-item.active');
+  if(active)active.scrollIntoView({block:'nearest',inline:'center',behavior:'smooth'});
+}
 function districtRows(){
   const q=(document.getElementById('districtSearch').value||'').toUpperCase();
   let rows=Object.entries(cut().districts||{}).map(([name,v])=>({name,n:v[0],rp:v[1],ap:v[2],gap:v[3]}));
   if(q)rows=rows.filter(x=>x.name.toUpperCase().includes(q));
-  rows.sort((a,b)=>typeof a[dSort.k]==='string'?dSort.dir*a[dSort.k].localeCompare(b[dSort.k]):dSort.dir*((+a[dSort.k])-(+b[dSort.k])));
+  rows.sort((a,b)=>(+b.gap)-(+a.gap)||(+b.n)-(+a.n)||a.name.localeCompare(b.name));
   return rows;
 }
 function renderDistricts(){
-  document.querySelector('#districtTable tbody').innerHTML=districtRows().map(x=>{
-    const who=x.gap>0?`RP +${fmt(x.gap)}`:(x.gap<0?`AP +${fmt(-x.gap)}`:'Empate');
-    return `<tr><td>${esc(x.name)}</td><td>${fmt(x.n)}</td><td>${fmt(x.rp)}</td><td>${fmt(x.ap)}</td><td class="${cls(x.gap)}">${who}</td></tr>`;
+  const host=document.getElementById('districtChart');
+  const rows=districtRows();
+  if(!host)return;
+  if(!rows.length){
+    host.innerHTML='<div class="district-chart-empty">No hay distritos que coincidan con esa búsqueda.</div>';
+    return;
+  }
+  const maxGap=Math.max(...rows.map(x=>Math.abs(+x.gap||0)),1);
+  host.innerHTML=rows.map(x=>{
+    const g=+x.gap||0;
+    const w=Math.max(0,Math.min(50,50*Math.abs(g)/maxGap));
+    const meta=g>0?`RP +${fmt(g)}`:(g<0?`AP +${fmt(-g)}`:'Empate');
+    const klass=g>0?'rp':(g<0?'ap':'tie');
+    const bar=g>0 ? `<div class="dbar rp" style="width:${w}%"></div>` : (g<0?`<div class="dbar ap" style="width:${w}%"></div>`:'');
+    return `<div class="drow">
+      <div class="dname">${esc(x.name)}<span class="dcount">${fmt(x.n)} acta(s) observada(s) aún abierta(s)</span></div>
+      <div class="dzone"><div class="dzero"></div>${bar}</div>
+      <div class="dmeta ${klass}">${meta}</div>
+    </div>`;
   }).join('');
 }
 function renderCauses(){
@@ -1528,7 +1609,7 @@ document.getElementById('projectionMethodLink').onclick=()=>{
 
 document.querySelectorAll('.tab').forEach(b=>b.onclick=()=>{document.querySelectorAll('.tab').forEach(x=>x.classList.remove('active'));document.querySelectorAll('.page').forEach(x=>x.classList.remove('active'));b.classList.add('active');document.getElementById(b.dataset.page).classList.add('active');if(b.dataset.page==='historico')drawChart()});
 document.getElementById('districtSearch').oninput=renderDistricts;
-document.querySelectorAll('#districtTable th').forEach(th=>th.onclick=()=>{const k=th.dataset.k;if(!k)return;if(dSort.k===k)dSort.dir*=-1;else{dSort.k=k;dSort.dir=k==='name'?1:-1}renderDistricts()});
+
 const sel=document.getElementById('cut');sel.innerHTML=cuts.map((c,i)=>`<option value="${i}">${esc(c.ts)}</option>`).join('');sel.value=currentIndex;sel.onchange=e=>{currentIndex=+e.target.value;render()};
 render();
 setTimeout(()=>location.reload(),5*60*1000);
